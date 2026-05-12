@@ -31,9 +31,41 @@ from typing import Optional, Tuple
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, PillowWriter
+from matplotlib.patches import Circle
+
+from src.config import ConfigParser
 
 
 DEFAULT_RESULTS_DIR = "results"
+
+
+def _load_cylinder_overlay_geometry(
+    config_path: str = "config.txt",
+) -> tuple[float, float, float] | None:
+    """Load cylinder center/radius for hollow plot overlays from config."""
+    if not os.path.exists(config_path):
+        return None
+
+    cfg = ConfigParser(config_path)
+    if not cfg.get("cylinder", False, bool):
+        return None
+
+    lx = cfg.get("lx", 10.0, float)
+    ly = cfg.get("ly", 1.0, float)
+    x_min = cfg.get("x_min", 0.0, float)
+    y_min = cfg.get("y_min", 0.0, float)
+    cx = cfg.get("cylinder_center_x", -1.0, float)
+    cy = cfg.get("cylinder_center_y", -1.0, float)
+    radius = cfg.get("cylinder_radius", -1.0, float)
+
+    if cx < 0.0:
+        cx = x_min + 0.25 * lx
+    if cy < 0.0:
+        cy = y_min + 0.5 * ly
+    if radius <= 0.0:
+        radius = ly / 8.0
+
+    return float(cx), float(cy), float(radius)
 
 
 def ensure_results_dir(results_dir: str = "results") -> str:
@@ -401,6 +433,7 @@ def plot_vorticity_video(
     frame_stride: int = 1,
     verbose: bool = False,
     results_dir: str = DEFAULT_RESULTS_DIR,
+    config_path: str = "config.txt",
 ) -> None:
     """Create an animated GIF of vorticity over all saved snapshots."""
     if save_name:
@@ -454,7 +487,8 @@ def plot_vorticity_video(
     if xc is None or yc is None or not frames:
         raise RuntimeError("Failed to assemble vorticity frames.")
 
-    max_abs_omega = max(max_abs_omega, 1e-12)
+    # Tighten the displayed range so the vorticity colors read darker/more saturated.
+    max_abs_omega = max(0.5 * max_abs_omega, 1e-12)
     fig, ax = plt.subplots(figsize=(8.5, 4.5))
     dx = float(xc[1] - xc[0]) if len(xc) > 1 else 1.0
     dy = float(yc[1] - yc[0]) if len(yc) > 1 else 1.0
@@ -479,6 +513,19 @@ def plot_vorticity_video(
     ax.set_xlabel("x")
     ax.set_ylabel("y")
     ax.set_aspect("equal")
+    circle_geometry = _load_cylinder_overlay_geometry(config_path=config_path)
+    if circle_geometry is not None:
+        cx, cy, radius = circle_geometry
+        ax.add_patch(
+            Circle(
+                (cx, cy),
+                radius,
+                fill=False,
+                edgecolor="black",
+                linewidth=1.6,
+                zorder=6,
+            )
+        )
 
     def _update(frame_idx: int):
         image.set_data(frames[frame_idx].T)
@@ -652,6 +699,8 @@ def main(argv=None):
                         )
     parser.add_argument("--snapshot-dir", type=str, default="output",
                         help="directory searched for snap_*.npz when building a vorticity video")
+    parser.add_argument("--config", type=str, default="config.txt",
+                        help="solver configuration file used for cylinder overlays")
     parser.add_argument("--video-fps", type=int, default=12,
                         help="frames per second for the animated vorticity GIF")
     parser.add_argument("--video-frame-stride", type=int, default=1,
@@ -706,6 +755,7 @@ def main(argv=None):
                 fps=args.video_fps,
                 frame_stride=args.video_frame_stride,
                 verbose=args.verbose,
+                config_path=args.config,
             )
         except Exception as e:
             print(f"Error creating vorticity video: {e}", file=sys.stderr)

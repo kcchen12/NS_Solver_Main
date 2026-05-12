@@ -12,6 +12,9 @@ auto_vorticity_video_frame_stride = 1
 # Aerodynamic outputs
 auto_generate_coeff_history = true
 auto_generate_aero_report = true
+auto_generate_shedding_spectrum = false
+auto_generate_pressure_coefficient_theta = false
+auto_generate_time_averaged_fields = false
 
 # Time trimming for post-processing
 auto_coeff_t_min = 0.5

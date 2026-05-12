@@ -26,9 +26,9 @@ bc_bottom = farfield
 bc_top = farfield
 
 # Inflow/farfield velocity components
-inflow_u = 0.05
+inflow_u = 1.0
 inflow_v = 0.0
-initial_v_perturbation_pct = 2.0
+initial_v_perturbation_pct = 0.0
 inflow_w = 0.0
 # Farfield behavior (used where face type is 'farfield')
 # farfield_mode: dirichlet | neumann
@@ -47,11 +47,11 @@ outflow_mode = convective
 outflow_speed = 1.0
 
 # Time integration
-t_end = 1.0
+t_end = 100.0
 cfl = .5
 
 # I/O parameters
-save_dt = 0.02
+save_dt = 0.2
 outdir = output
 # Grid generation (used by both main.py and pre_generate_grid.py)
 uniform_grid = false
@@ -73,42 +73,7 @@ verbose = true
 cylinder_center_x = 0.0
 cylinder_center_y = 0.0
 # Cylinder radius in physical units (set > 0 to override default ly/8)
-cylinder_radius = 4.0
-
-# Cylinder experiment controls
-# cylinder_experiment options:
-#   none
-#   top-indent
-#   simulated-sweeping-jet
-#   geometry-resolved-sweeping-jet
-cylinder_experiment = geometry-resolved-sweeping-jet
-
-# Experimental geometry controls
-cylinder_indent_width = 0.0
-cylinder_indent_depth = 0.0
-
-# Shared sweeping-jet actuation controls
-sweeping_jet_velocity_ratio = 10.0
-sweeping_jet_frequency = 0.2
-sweeping_jet_center_deg = 0.0
-sweeping_jet_angle_deg = 45.0
-sweeping_jet_phase_deg = 0.0
-
-# Experimental geometry-resolved sweeping-jet controls
-# All lengths below are physical lengths in the cylinder-local frame.
-resolved_jet_cavity_width = 3.6
-resolved_jet_cavity_height = 3.0
-resolved_jet_slot_width = 0.96
-resolved_jet_slot_height = 0.72
-resolved_jet_feed_width = 1.8
-resolved_jet_feed_height = 0.88
-resolved_jet_nozzle_length = 0.9
-resolved_jet_slot_exit_width = 2.4
-resolved_jet_island_wall_gap = 0.45
-resolved_jet_island_center_gap = 1.45
-resolved_jet_island_leading_gap = 0.38
-resolved_jet_island_trailing_gap = 0.38
-resolved_jet_island_taper = 0.22
+cylinder_radius = 0.5
 # If true, re is interpreted as Re_D based on cylinder diameter
 re_is_cylinder_based = true
 
@@ -116,9 +81,9 @@ re_is_cylinder_based = true
 #   stationary  -> fixed_cylinder
 #   constant    -> one-direction constant angular velocity
 #   oscillatory -> back-and-forth sinusoidal angular velocity
-cylinder_rotation_mode = stationary
+cylinder_rotation_mode = oscillatory
 # omega(t) = amplitude  for constant
 # omega(t) = amplitude * sin(2*pi*frequency*t + phase) for oscillatory
-cylinder_rotation_amplitude = 5.0
-cylinder_rotation_frequency = 0.12
+cylinder_rotation_amplitude = 0.4
+cylinder_rotation_frequency = 0.626
 cylinder_rotation_phase_deg = 0.0

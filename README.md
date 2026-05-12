@@ -18,9 +18,11 @@ Additional notes live in [docs/README.md](docs/README.md).
 
 - [main.py](/Users/Carolyn/Desktop/NS_Solver_Claude/main.py): main solver entry point
 - [config.txt](/Users/Carolyn/Desktop/NS_Solver_Claude/config.txt): run configuration
+- [experimental_config.txt](/Users/Carolyn/Desktop/NS_Solver_Claude/experimental_config.txt): experimental cylinder and jet-actuator configuration
 - [post_config.txt](/Users/Carolyn/Desktop/NS_Solver_Claude/post_config.txt): post-processing configuration
 - [pre_generate_grid.py](/Users/Carolyn/Desktop/NS_Solver_Claude/pre_generate_grid.py): standalone prepared-grid generator
 - [analyze_aerodynamics.py](/Users/Carolyn/Desktop/NS_Solver_Claude/analyze_aerodynamics.py): aerodynamic coefficient and Strouhal-style analysis
+- [time_average_snapshots.py](/Users/Carolyn/Desktop/NS_Solver_Claude/time_average_snapshots.py): time-averaged mean and RMS field extraction from snapshots
 - [view_snapshot_viewer.py](/Users/Carolyn/Desktop/NS_Solver_Claude/view_snapshot_viewer.py): snapshot and coefficient-history plotting
 
 ## Quick Start
@@ -34,10 +36,10 @@ pip install -r requirements.txt
 python main.py
 ```
 
-Use an explicit run config and post config:
+Use explicit run, experimental, and post configs:
 
 ```bash
-python main.py --config config.txt --post-config post_config.txt
+python main.py --config config.txt --experiment-config experimental_config.txt --post-config post_config.txt
 ```
 
 Run in parallel:
@@ -60,12 +62,13 @@ Requirements:
 
 ## Config Files
 
-The project now uses two config files on purpose:
+The project now uses three config files on purpose:
 
 - [config.txt](/Users/Carolyn/Desktop/NS_Solver_Claude/config.txt): how the simulation runs
+- [experimental_config.txt](/Users/Carolyn/Desktop/NS_Solver_Claude/experimental_config.txt): optional experimental cylinder / jet-actuator controls
 - [post_config.txt](/Users/Carolyn/Desktop/NS_Solver_Claude/post_config.txt): which derived plots/reports get generated after the run
 
-Examples are provided in [config_example.txt](/Users/Carolyn/Desktop/NS_Solver_Claude/docs/examples/config_example.txt) and [post_config_example.txt](/Users/Carolyn/Desktop/NS_Solver_Claude/docs/examples/post_config_example.txt).
+Examples are provided in [config_example.txt](/Users/Carolyn/Desktop/NS_Solver_Claude/docs/examples/config_example.txt), [experimental_config_example.txt](/Users/Carolyn/Desktop/NS_Solver_Claude/docs/examples/experimental_config_example.txt), and [post_config_example.txt](/Users/Carolyn/Desktop/NS_Solver_Claude/docs/examples/post_config_example.txt).
 
 ### Run Config
 
@@ -102,11 +105,37 @@ Cylinder / immersed boundary:
 - `cylinder_center_x`, `cylinder_center_y`
 - `cylinder_radius`
 - `re_is_cylinder_based`
+- `cylinder_rotation_mode`
+- `cylinder_rotation_amplitude`
+- `cylinder_rotation_frequency`
+- `cylinder_rotation_phase_deg`
 
 Initialization and runtime:
 
 - `initial_v_perturbation_pct`: one-time startup perturbation applied to interior `v` as a percent of `inflow_u`
 - `verbose`: print run diagnostics
+
+### Experimental Config
+
+- `cylinder_experiment`
+- `cylinder_geometry_mode`, `ibm_shape`
+- `cylinder_indent_width`, `cylinder_indent_depth`
+- `cylinder_actuation_mode`
+- `sweeping_jet_velocity_ratio`
+- `sweeping_jet_frequency`
+- `sweeping_jet_center_deg`
+- `sweeping_jet_slot_width_deg`
+- `sweeping_jet_slot_depth`
+- `sweeping_jet_angle_deg`
+- `sweeping_jet_phase_deg`
+- `resolved_jet_cavity_width`, `resolved_jet_cavity_height`
+- `resolved_jet_slot_width`, `resolved_jet_slot_height`
+- `resolved_jet_feed_width`, `resolved_jet_feed_height`
+- `resolved_jet_nozzle_length`
+- `resolved_jet_slot_exit_width`
+- `resolved_jet_island_wall_gap`, `resolved_jet_island_center_gap`
+- `resolved_jet_island_leading_gap`, `resolved_jet_island_trailing_gap`
+- `resolved_jet_island_taper`
 
 ### Post Config
 
@@ -115,6 +144,9 @@ Initialization and runtime:
 - `auto_generate_grid_spacing`: automatically generate `results/grid.png`
 - `auto_generate_coeff_history`: automatically generate `results/coeff_history.png`
 - `auto_generate_aero_report`: automatically generate `results/aero_report.txt`
+- `auto_generate_shedding_spectrum`: automatically generate `results/shedding_spectrum.png`
+- `auto_generate_pressure_coefficient_theta`: automatically generate `results/pressure_coefficient_theta.csv` and `results/pressure_coefficient_theta.png`
+- `auto_generate_time_averaged_fields`: automatically generate `results/time_averaged_fields.npz`
 - `auto_generate_ibm_forcing`: automatically generate `results/ibm_forcing.png` from the latest snapshot
 - `auto_generate_vorticity_video`: automatically generate `results/vorticity.gif` from all saved snapshots
 - `auto_vorticity_video_frame_stride`: use every `n`th snapshot when building the vorticity GIF
@@ -267,6 +299,21 @@ Useful analysis options:
 - `--f-min`, `--f-max`
 - `--save-series`
 - `--save-report`
+
+### Time-Averaged Fields
+
+Run directly:
+
+```bash
+python time_average_snapshots.py --indir output --t-min 1.0 --save-name time_averaged_fields.npz
+```
+
+This script saves:
+
+- `u_mean`, `v_mean`, `p_mean`
+- `u_rms`, `v_rms`
+- `xc`, `yc`
+- `t_start`, `t_end`, `n_snapshots`, `averaging_duration`
 
 ## Snapshot Viewer
 

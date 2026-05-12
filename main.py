@@ -13,7 +13,7 @@ Simulates **uniform flow in a 2-D box** using:
 
 Usage
 -----
-Serial run (reads from config.txt)::
+Serial run (reads from config.txt, experimental_config.txt, and post_config.txt)::
 
     python main.py
 
@@ -34,6 +34,7 @@ Command-line arguments override config file values::
     --save_dt   Interval between snapshots       [default: from config]
     --outdir    Output directory                 [default: from config]
     --cylinder  Add an immersed-boundary cylinder [flag]
+    --experiment-config  Path to experimental cylinder config [default: experimental_config.txt]
     --plot      Save matplotlib plots at the end  [default: from post config]
 """
 
@@ -54,7 +55,12 @@ from src.io_utils import (
 )
 from src.parallel import ParallelDecomposition
 from src.config import ConfigParser
-from analyze_aerodynamics import run_analysis as run_aero_analysis
+from analyze_aerodynamics import (
+    run_analysis as run_aero_analysis,
+    plot_shedding_spectrum,
+    save_pressure_coefficient_report,
+)
+from time_average_snapshots import save_time_averaged_fields
 from view_snapshot_viewer import find_latest_snapshot, plot_coeff_history
 from view_snapshot_viewer import plot_ibm_forcing, plot_vorticity_video
 
@@ -173,6 +179,9 @@ def parse_args():
     p_pre = argparse.ArgumentParser(add_help=False)
     p_pre.add_argument("--config", type=str, default=default_config,
                        help="Path to configuration file")
+    p_pre.add_argument("--experiment-config", type=str,
+                       default=os.path.join(SCRIPT_DIR, "experimental_config.txt"),
+                       help="Path to experimental cylinder configuration file")
     p_pre.add_argument("--post-config", type=str,
                        default=os.path.join(SCRIPT_DIR, "post_config.txt"),
                        help="Path to post-processing configuration file")
@@ -180,6 +189,7 @@ def parse_args():
 
     # Read config files
     cfg = ConfigParser(args_pre.config)
+    exp_cfg = ConfigParser(args_pre.experiment_config)
     post_cfg = ConfigParser(args_pre.post_config)
 
     # Unified grid controls from config.txt.
@@ -200,6 +210,8 @@ def parse_args():
     p = argparse.ArgumentParser(description="2-D Navier-Stokes solver")
     p.add_argument("--config", type=str, default=default_config,
                    help="Path to configuration file")
+    p.add_argument("--experiment-config", type=str, default=args_pre.experiment_config,
+                   help="Path to experimental cylinder configuration file")
     p.add_argument("--post-config", type=str, default=args_pre.post_config,
                    help="Path to post-processing configuration file")
     p.add_argument("--nx",       type=int,   default=cfg.get("nx", 64, int))
@@ -265,100 +277,100 @@ def parse_args():
                        "geometry-resolved-sweeping-jet",
                    ],
                    default=_normalize_cylinder_experiment_mode(
-                       cfg.get("cylinder_experiment", "none", str)),
+                       exp_cfg.get("cylinder_experiment", "none", str)),
                    help="High-level experimental cylinder mode")
     p.add_argument("--cylinder-geometry-mode", type=str,
                    choices=["circle", "circle-with-top-indent"],
                    default=_normalize_cylinder_geometry_mode(
-                       cfg.get(
+                       exp_cfg.get(
                            "cylinder_geometry_mode",
-                           cfg.get("ibm_shape", "circle", str),
+                           exp_cfg.get("ibm_shape", "circle", str),
                            str,
                        )),
                    help="Cylinder geometry mode")
     p.add_argument("--ibm-shape", type=str,
                    choices=["circle", "circle-with-top-indent"],
                    default=_normalize_cylinder_geometry_mode(
-                       cfg.get(
+                       exp_cfg.get(
                            "cylinder_geometry_mode",
-                           cfg.get("ibm_shape", "circle", str),
+                           exp_cfg.get("ibm_shape", "circle", str),
                            str,
                        )),
                    help="Immersed-body shape")
     p.add_argument("--cylinder-indent-width", type=float,
-                   default=cfg.get("cylinder_indent_width", 0.0, float),
+                   default=exp_cfg.get("cylinder_indent_width", 0.0, float),
                    help="Width of the rectangular top indent for circle-with-top-indent")
     p.add_argument("--cylinder-indent-depth", type=float,
-                   default=cfg.get("cylinder_indent_depth", 0.0, float),
+                   default=exp_cfg.get("cylinder_indent_depth", 0.0, float),
                    help="Depth of the rectangular top indent for circle-with-top-indent")
     p.add_argument("--cylinder-actuation-mode", type=str,
                    choices=["none", "sweeping-jet", "geometry-resolved-sweeping-jet"],
                    default=_normalize_cylinder_actuation_mode(
-                       cfg.get(
+                       exp_cfg.get(
                            "cylinder_actuation_mode",
-                           cfg.get("actuator_model", "none", str),
+                           exp_cfg.get("actuator_model", "none", str),
                            str,
                        )),
                    help="Optional finite jet actuation model on the cylinder surface")
     p.add_argument("--sweeping-jet-velocity-ratio", type=float,
-                   default=cfg.get("sweeping_jet_velocity_ratio", 0.25, float),
+                   default=exp_cfg.get("sweeping_jet_velocity_ratio", 0.25, float),
                    help="Jet speed magnitude relative to inflow_u")
     p.add_argument("--sweeping-jet-frequency", type=float,
-                   default=cfg.get("sweeping_jet_frequency", -1.0, float),
+                   default=exp_cfg.get("sweeping_jet_frequency", -1.0, float),
                    help="Jet sweep frequency; <=0 uses a shedding-scale default")
     p.add_argument("--sweeping-jet-center-deg", type=float,
-                   default=cfg.get("sweeping_jet_center_deg", 90.0, float),
+                   default=exp_cfg.get("sweeping_jet_center_deg", 90.0, float),
                    help="Angular location of the jet outlet on the cylinder surface")
     p.add_argument("--sweeping-jet-slot-width-deg", type=float,
-                   default=cfg.get("sweeping_jet_slot_width_deg", 18.0, float),
+                   default=exp_cfg.get("sweeping_jet_slot_width_deg", 18.0, float),
                    help="Angular width of the finite jet outlet")
     p.add_argument("--sweeping-jet-slot-depth", type=float,
-                   default=cfg.get("sweeping_jet_slot_depth", 0.0, float),
+                   default=exp_cfg.get("sweeping_jet_slot_depth", 0.0, float),
                    help="Radial depth of the finite jet outlet band inside the IBM body")
     p.add_argument("--sweeping-jet-angle-deg", type=float,
-                   default=cfg.get("sweeping_jet_angle_deg", 25.0, float),
+                   default=exp_cfg.get("sweeping_jet_angle_deg", 25.0, float),
                    help="Sweep amplitude of the jet direction relative to the local normal")
     p.add_argument("--sweeping-jet-phase-deg", type=float,
-                   default=cfg.get("sweeping_jet_phase_deg", 0.0, float),
+                   default=exp_cfg.get("sweeping_jet_phase_deg", 0.0, float),
                    help="Phase offset for the sweeping jet direction oscillation")
     p.add_argument("--resolved-jet-cavity-width", type=float,
-                   default=cfg.get("resolved_jet_cavity_width", 0.0, float),
+                   default=exp_cfg.get("resolved_jet_cavity_width", 0.0, float),
                    help="Width of the internal plenum for geometry-resolved jet mode")
     p.add_argument("--resolved-jet-cavity-height", type=float,
-                   default=cfg.get("resolved_jet_cavity_height", 0.0, float),
+                   default=exp_cfg.get("resolved_jet_cavity_height", 0.0, float),
                    help="Height of the internal plenum for geometry-resolved jet mode")
     p.add_argument("--resolved-jet-slot-width", type=float,
-                   default=cfg.get("resolved_jet_slot_width", 0.0, float),
+                   default=exp_cfg.get("resolved_jet_slot_width", 0.0, float),
                    help="Width of the exit slot for geometry-resolved jet mode")
     p.add_argument("--resolved-jet-slot-height", type=float,
-                   default=cfg.get("resolved_jet_slot_height", 0.0, float),
+                   default=exp_cfg.get("resolved_jet_slot_height", 0.0, float),
                    help="Height of the exit slot for geometry-resolved jet mode")
     p.add_argument("--resolved-jet-feed-width", type=float,
-                   default=cfg.get("resolved_jet_feed_width", 0.0, float),
+                   default=exp_cfg.get("resolved_jet_feed_width", 0.0, float),
                    help="Width of the internal forcing/feed patch for geometry-resolved jet mode")
     p.add_argument("--resolved-jet-feed-height", type=float,
-                   default=cfg.get("resolved_jet_feed_height", 0.0, float),
+                   default=exp_cfg.get("resolved_jet_feed_height", 0.0, float),
                    help="Height of the internal forcing/feed patch for geometry-resolved jet mode")
     p.add_argument("--resolved-jet-nozzle-length", type=float,
-                   default=cfg.get("resolved_jet_nozzle_length", 0.0, float),
+                   default=exp_cfg.get("resolved_jet_nozzle_length", 0.0, float),
                    help="Length of the tapered nozzle section between plenum and slot")
     p.add_argument("--resolved-jet-slot-exit-width", type=float,
-                   default=cfg.get("resolved_jet_slot_exit_width", 0.0, float),
+                   default=exp_cfg.get("resolved_jet_slot_exit_width", 0.0, float),
                    help="Width of the internal exit wedge where the slot meets the cylinder wall")
     p.add_argument("--resolved-jet-island-wall-gap", type=float,
-                   default=cfg.get("resolved_jet_island_wall_gap", 0.0, float),
+                   default=exp_cfg.get("resolved_jet_island_wall_gap", 0.0, float),
                    help="Gap between each floating island and the outer plenum wall")
     p.add_argument("--resolved-jet-island-center-gap", type=float,
-                   default=cfg.get("resolved_jet_island_center_gap", 0.0, float),
+                   default=exp_cfg.get("resolved_jet_island_center_gap", 0.0, float),
                    help="Gap between the two floating islands across the center channel")
     p.add_argument("--resolved-jet-island-leading-gap", type=float,
-                   default=cfg.get("resolved_jet_island_leading_gap", 0.0, float),
+                   default=exp_cfg.get("resolved_jet_island_leading_gap", 0.0, float),
                    help="Gap from the back of the plenum to the start of each floating island")
     p.add_argument("--resolved-jet-island-trailing-gap", type=float,
-                   default=cfg.get("resolved_jet_island_trailing_gap", 0.0, float),
+                   default=exp_cfg.get("resolved_jet_island_trailing_gap", 0.0, float),
                    help="Gap from the front of each floating island to the nozzle throat")
     p.add_argument("--resolved-jet-island-taper", type=float,
-                   default=cfg.get("resolved_jet_island_taper", 0.0, float),
+                   default=exp_cfg.get("resolved_jet_island_taper", 0.0, float),
                    help="Taper amount applied to the front face of each floating island")
     p.add_argument("--re-is-cylinder-based", type=str_to_bool,
                    default=cfg.get("re_is_cylinder_based", True, bool),
@@ -394,6 +406,18 @@ def parse_args():
                    default=post_cfg.get(
                        "auto_generate_aero_report", False, bool),
                    help="Automatically save the aerodynamic report after the run")
+    p.add_argument("--auto-generate-shedding-spectrum", type=str_to_bool,
+                   default=post_cfg.get(
+                       "auto_generate_shedding_spectrum", False, bool),
+                   help="Automatically save the Fourier energy spectrum of C_l")
+    p.add_argument("--auto-generate-pressure-coefficient-theta", type=str_to_bool,
+                   default=post_cfg.get(
+                       "auto_generate_pressure_coefficient_theta", False, bool),
+                   help="Automatically save C_p(theta) CSV and PNG from the latest snapshot")
+    p.add_argument("--auto-generate-time-averaged-fields", type=str_to_bool,
+                   default=post_cfg.get(
+                       "auto_generate_time_averaged_fields", False, bool),
+                   help="Automatically save time-averaged mean/RMS fields from output snapshots")
     p.add_argument("--auto-generate-ibm-forcing", type=str_to_bool,
                    default=post_cfg.get(
                        "auto_generate_ibm_forcing", False, bool),
@@ -1365,7 +1389,7 @@ def _plot_results(solver, grid, args):
         # Draw the immersed cylinder on every panel so geometry alignment
         # is visible in vorticity, pressure, and velocity plots.
         for ax in axes:
-            _plot_ibm_outline(ax, args, color="white", linewidth=1.6)
+            _plot_ibm_outline(ax, args, color="black", linewidth=1.6)
 
     # Vorticity: use robust clipping + high-contrast diverging map
     # so coherent structures are easier to read.
@@ -1516,7 +1540,11 @@ def _run_auto_outputs(grid, args):
     if args.auto_generate_grid_spacing:
         _plot_grid(grid, args)
 
-    need_aero_series = args.auto_generate_coeff_history or args.auto_generate_aero_report
+    need_aero_series = (
+        args.auto_generate_coeff_history
+        or args.auto_generate_aero_report
+        or args.auto_generate_shedding_spectrum
+    )
     aero_series_path = os.path.join(results_dir, "aero.csv")
     aero_report_path = os.path.join(results_dir, "aero_report.txt")
     aero_ready = False
@@ -1560,8 +1588,36 @@ def _run_auto_outputs(grid, args):
                 "the aerodynamic series was not generated."
             )
 
+    if args.auto_generate_shedding_spectrum:
+        if aero_ready:
+            try:
+                _, _, r = _resolve_cylinder_geometry(args)
+                char_length = 2.0 * r if args.cylinder else 1.0
+                plot_shedding_spectrum(
+                    aero_series_path,
+                    save_name="shedding_spectrum.png",
+                    t_min=args.auto_aero_t_min,
+                    f_min=0.05,
+                    f_max=2.0,
+                    char_length=char_length,
+                    u_ref=args.inflow_u,
+                )
+            except Exception as exc:
+                print(
+                    f"  Warning: automatic shedding-spectrum plot failed: {exc}"
+                )
+        else:
+            print(
+                "  Warning: automatic shedding-spectrum plot skipped because "
+                "the aerodynamic series was not generated."
+            )
+
     latest_snapshot = None
-    if args.auto_generate_ibm_forcing or args.auto_generate_vorticity_video:
+    if (
+        args.auto_generate_ibm_forcing
+        or args.auto_generate_vorticity_video
+        or args.auto_generate_pressure_coefficient_theta
+    ):
         latest_snapshot = find_latest_snapshot(dirpath=args.outdir)
         if latest_snapshot is None:
             print(
@@ -1574,6 +1630,23 @@ def _run_auto_outputs(grid, args):
         except Exception as exc:
             print(f"  Warning: automatic IBM-forcing plot failed: {exc}")
 
+    if args.auto_generate_pressure_coefficient_theta:
+        try:
+            cx, cy, r = _resolve_cylinder_geometry(args)
+            save_pressure_coefficient_report(
+                latest_snapshot,
+                u_ref=args.inflow_u,
+                save_csv="pressure_coefficient_theta.csv",
+                save_plot="pressure_coefficient_theta.png",
+                config_path=args.config,
+                cylinder_center=(cx, cy),
+                cylinder_radius=r,
+            )
+        except Exception as exc:
+            print(
+                f"  Warning: automatic pressure-coefficient report failed: {exc}"
+            )
+
     if args.auto_generate_vorticity_video:
         try:
             plot_vorticity_video(
@@ -1581,9 +1654,25 @@ def _run_auto_outputs(grid, args):
                 save_name="vorticity.gif",
                 frame_stride=max(int(args.auto_vorticity_video_frame_stride), 1),
                 verbose=bool(args.verbose),
+                config_path=args.config,
             )
         except Exception as exc:
             print(f"  Warning: automatic vorticity video failed: {exc}")
+
+    if args.auto_generate_time_averaged_fields:
+        try:
+            save_time_averaged_fields(
+                indir=args.outdir,
+                t_min=args.auto_aero_t_min,
+                results_dir=results_dir,
+                save_name="time_averaged_fields.npz",
+            )
+            print(
+                f"Saved time-averaged fields: "
+                f"{os.path.join(results_dir, 'time_averaged_fields.npz')}"
+            )
+        except Exception as exc:
+            print(f"  Warning: automatic time-averaged fields failed: {exc}")
 
 
 # ---------------------------------------------------------------------------

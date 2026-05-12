@@ -63,11 +63,11 @@ cylinder = true
 cylinder_center_x = 8.0
 cylinder_center_y = 5.0
 cylinder_radius = 0.5
+re_is_cylinder_based = true
 cylinder_rotation_mode = stationary
 cylinder_rotation_amplitude = 0.0
 cylinder_rotation_frequency = 0.0
 cylinder_rotation_phase_deg = 0.0
-re_is_cylinder_based = true
 verbose = true
 
 # Optional aerodynamic post-processing normalization used by

@@ -1,0 +1,38 @@
+# NS_Solver Example Experimental Configuration
+# Optional cylinder experiments and jet-actuator settings for main.py.
+
+# Cylinder experiment controls
+cylinder_experiment = none
+
+# Optional alternate geometry / IBM aliases
+cylinder_geometry_mode = circle
+# ibm_shape = circle
+
+# Top-indent cylinder controls
+cylinder_indent_width = 0.0
+cylinder_indent_depth = 0.0
+
+# Sweeping-jet actuation controls
+cylinder_actuation_mode = none
+sweeping_jet_velocity_ratio = 0.25
+sweeping_jet_frequency = -1.0
+sweeping_jet_center_deg = 90.0
+sweeping_jet_slot_width_deg = 18.0
+sweeping_jet_slot_depth = 0.0
+sweeping_jet_angle_deg = 25.0
+sweeping_jet_phase_deg = 0.0
+
+# Geometry-resolved sweeping-jet controls
+resolved_jet_cavity_width = 0.0
+resolved_jet_cavity_height = 0.0
+resolved_jet_slot_width = 0.0
+resolved_jet_slot_height = 0.0
+resolved_jet_feed_width = 0.0
+resolved_jet_feed_height = 0.0
+resolved_jet_nozzle_length = 0.0
+resolved_jet_slot_exit_width = 0.0
+resolved_jet_island_wall_gap = 0.0
+resolved_jet_island_center_gap = 0.0
+resolved_jet_island_leading_gap = 0.0
+resolved_jet_island_trailing_gap = 0.0
+resolved_jet_island_taper = 0.0
