@@ -31,6 +31,35 @@ from analyze_aerodynamics import (
 DEFAULT_RESULTS_DIR = "results"
 
 
+def _validate_axis_scales(
+    x_scale: float = 1.0,
+    y_scale: float = 1.0,
+) -> tuple[float, float]:
+    """Validate independent display scale factors for x and y."""
+    x_scale = float(x_scale)
+    y_scale = float(y_scale)
+    if x_scale <= 0.0 or y_scale <= 0.0:
+        raise ValueError("x_scale and y_scale must both be positive.")
+    return x_scale, y_scale
+
+
+def _axis_aspect(x_scale: float = 1.0, y_scale: float = 1.0) -> float:
+    """Return the matplotlib aspect ratio for requested x/y display scaling."""
+    x_scale, y_scale = _validate_axis_scales(x_scale=x_scale, y_scale=y_scale)
+    return y_scale / x_scale
+
+
+def _scaled_figsize(
+    width: float,
+    height: float,
+    x_scale: float = 1.0,
+    y_scale: float = 1.0,
+) -> tuple[float, float]:
+    """Scale figure width/height independently to match the requested view."""
+    x_scale, y_scale = _validate_axis_scales(x_scale=x_scale, y_scale=y_scale)
+    return width * x_scale, height * y_scale
+
+
 def _compute_time_weights(times: np.ndarray) -> tuple[np.ndarray, float]:
     """Return trapezoidal-integration weights and total averaging duration."""
     if times.ndim != 1 or times.size == 0:
@@ -161,6 +190,95 @@ def save_time_averaged_fields(
     return save_path
 
 
+def plot_time_averaged_fields(
+    stats_path: str,
+    save_name: str = "time_averaged_fields.png",
+    results_dir: str = DEFAULT_RESULTS_DIR,
+    x_scale: float = 1.0,
+    y_scale: float = 1.0,
+) -> str:
+    """Render a readable summary plot from a saved time-averaged-field NPZ."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError as exc:
+        raise ImportError("matplotlib is required to plot time-averaged fields.") from exc
+
+    with np.load(stats_path, allow_pickle=False) as data:
+        xc = np.asarray(data["xc"], dtype=float)
+        yc = np.asarray(data["yc"], dtype=float)
+        u_mean = np.asarray(data["u_mean"], dtype=float)
+        v_mean = np.asarray(data["v_mean"], dtype=float)
+        p_mean = np.asarray(data["p_mean"], dtype=float)
+        u_rms = np.asarray(data["u_rms"], dtype=float)
+        v_rms = np.asarray(data["v_rms"], dtype=float)
+        t_start = float(data["t_start"])
+        t_end = float(data["t_end"])
+        n_snapshots = int(data["n_snapshots"])
+
+    dx = float(xc[1] - xc[0]) if xc.size > 1 else 1.0
+    dy = float(yc[1] - yc[0]) if yc.size > 1 else 1.0
+    extent = (
+        float(xc[0] - 0.5 * dx),
+        float(xc[-1] + 0.5 * dx),
+        float(yc[0] - 0.5 * dy),
+        float(yc[-1] + 0.5 * dy),
+    )
+    mean_speed = np.sqrt(u_mean ** 2 + v_mean ** 2)
+
+    figsize = _scaled_figsize(15.0, 8.0, x_scale=x_scale, y_scale=y_scale)
+    aspect = _axis_aspect(x_scale=x_scale, y_scale=y_scale)
+    fig, axes = plt.subplots(2, 3, figsize=figsize, constrained_layout=True)
+    panels = [
+        ("Mean u", u_mean, "seismic"),
+        ("Mean p", p_mean, "RdBu_r"),
+        ("Mean speed", mean_speed, "viridis"),
+        ("u RMS", u_rms, "magma"),
+        ("v RMS", v_rms, "magma"),
+    ]
+
+    for ax, (title, field, cmap) in zip(axes.flat, panels):
+        if title == "Mean u":
+            vmax = max(float(np.percentile(np.abs(field), 99.0)), 1e-12)
+            vmin = -vmax
+        elif title == "Mean p":
+            vmax = max(float(np.percentile(np.abs(field), 99.0)), 1e-12)
+            vmin = -vmax
+        else:
+            vmin = 0.0
+            vmax = max(float(np.percentile(field, 99.0)), 1e-12)
+        im = ax.imshow(
+            field.T,
+            origin="lower",
+            extent=extent,
+            cmap=cmap,
+            vmin=vmin,
+            vmax=vmax,
+            aspect=aspect,
+        )
+        ax.set_title(title, fontsize=11, fontweight="bold")
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
+        fig.colorbar(im, ax=ax, shrink=0.86)
+
+    for ax in axes.flat[len(panels):]:
+        ax.axis("off")
+
+    fig.suptitle(
+        f"Time-Averaged Fields, t in [{t_start:.4f}, {t_end:.4f}], "
+        f"N={n_snapshots}",
+        fontsize=13,
+        fontweight="bold",
+    )
+
+    os.makedirs(results_dir, exist_ok=True)
+    save_path = os.path.join(results_dir, save_name)
+    fig.savefig(save_path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    return save_path
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         description="Compute time-averaged mean and RMS fields from output snapshots."
@@ -177,6 +295,14 @@ def main(argv=None) -> int:
                         help="directory to receive the averaged output file")
     parser.add_argument("--save-name", type=str, default="time_averaged_fields.npz",
                         help="output NPZ filename")
+    parser.add_argument("--plot", action="store_true",
+                        help="also save a readable PNG summary of the averaged fields")
+    parser.add_argument("--plot-save-name", type=str, default="time_averaged_fields.png",
+                        help="output PNG filename when --plot is used")
+    parser.add_argument("--x-scale", type=float, default=1.0,
+                        help="horizontal display scale for the saved PNG plot")
+    parser.add_argument("--y-scale", type=float, default=1.0,
+                        help="vertical display scale for the saved PNG plot")
     args = parser.parse_args(argv)
 
     save_path = save_time_averaged_fields(
@@ -188,6 +314,15 @@ def main(argv=None) -> int:
         save_name=args.save_name,
     )
     print(f"Saved time-averaged fields: {save_path}")
+    if args.plot:
+        plot_path = plot_time_averaged_fields(
+            save_path,
+            save_name=args.plot_save_name,
+            results_dir=args.results_dir,
+            x_scale=args.x_scale,
+            y_scale=args.y_scale,
+        )
+        print(f"Saved time-averaged field plot: {plot_path}")
     return 0
 
 

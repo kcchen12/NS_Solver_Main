@@ -22,7 +22,7 @@ bc_top = farfield
 # Inflow/farfield velocity components
 inflow_u = 1.0
 inflow_v = 0.0
-initial_v_perturbation_pct = 2.0
+initial_v_perturbation_percent = 2.0
 inflow_w = 0.0
 
 # Wall behavior (used where face type is 'wall')
@@ -68,6 +68,12 @@ cylinder_rotation_mode = stationary
 cylinder_rotation_amplitude = 0.0
 cylinder_rotation_frequency = 0.0
 cylinder_rotation_phase_deg = 0.0
+cylinder_translation_mode = stationary
+cylinder_translation_amplitude_percent = 10.0
+cylinder_translation_x_percent = 10.0
+cylinder_translation_y_percent = 10.0
+cylinder_translation_frequency = 0.0
+cylinder_translation_phase_deg = 0.0
 verbose = true
 
 # Optional aerodynamic post-processing normalization used by

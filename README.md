@@ -109,10 +109,15 @@ Cylinder / immersed boundary:
 - `cylinder_rotation_amplitude`
 - `cylinder_rotation_frequency`
 - `cylinder_rotation_phase_deg`
+- `cylinder_translation_mode`
+- `cylinder_translation_amplitude_percent`
+- `cylinder_translation_x_percent`, `cylinder_translation_y_percent`
+- `cylinder_translation_frequency`
+- `cylinder_translation_phase_deg`
 
 Initialization and runtime:
 
-- `initial_v_perturbation_pct`: one-time startup perturbation applied to interior `v` as a percent of `inflow_u`
+- `initial_v_perturbation_percent`: one-time startup perturbation applied to interior `v` as a percent of `inflow_u`
 - `verbose`: print run diagnostics
 
 ### Experimental Config
@@ -140,13 +145,13 @@ Initialization and runtime:
 ### Post Config
 
 - `plot`: save the standard end-of-run result figure
-- `plot_grid`: save the grid-spacing/concentration figure
 - `auto_generate_grid_spacing`: automatically generate `results/grid.png`
 - `auto_generate_coeff_history`: automatically generate `results/coeff_history.png`
 - `auto_generate_aero_report`: automatically generate `results/aero_report.txt`
 - `auto_generate_shedding_spectrum`: automatically generate `results/shedding_spectrum.png`
 - `auto_generate_pressure_coefficient_theta`: automatically generate `results/pressure_coefficient_theta.csv` and `results/pressure_coefficient_theta.png`
 - `auto_generate_time_averaged_fields`: automatically generate `results/time_averaged_fields.npz`
+- `auto_generate_time_averaged_plots`: automatically generate `results/time_averaged_fields.png`
 - `auto_generate_ibm_forcing`: automatically generate `results/ibm_forcing.png` from the latest snapshot
 - `auto_generate_vorticity_video`: automatically generate `results/vorticity.gif` from all saved snapshots
 - `auto_vorticity_video_frame_stride`: use every `n`th snapshot when building the vorticity GIF
@@ -157,12 +162,12 @@ Initialization and runtime:
 
 ### Initial Perturbation
 
-`initial_v_perturbation_pct` is easy to miss but useful for wake development studies and vortex-shedding startup tests.
+`initial_v_perturbation_percent` is easy to miss but useful for wake development studies and vortex-shedding startup tests.
 
 If:
 
 - `inflow_u = 1.0`
-- `initial_v_perturbation_pct = 2.0`
+- `initial_v_perturbation_percent = 2.0`
 
 then the solver applies a one-time interior perturbation of:
 
@@ -229,7 +234,6 @@ Common outputs:
 Enable in [post_config.txt](/Users/Carolyn/Desktop/NS_Solver_Claude/post_config.txt):
 
 ```text
-plot_grid = true
 auto_generate_grid_spacing = true
 auto_generate_vorticity_video = true
 auto_vorticity_video_frame_stride = 5
@@ -305,7 +309,7 @@ Useful analysis options:
 Run directly:
 
 ```bash
-python time_average_snapshots.py --indir output --t-min 1.0 --save-name time_averaged_fields.npz
+python time_average_snapshots.py --indir output --t-min 1.0 --save-name time_averaged_fields.npz --plot
 ```
 
 This script saves:
@@ -331,6 +335,8 @@ Useful viewer options:
 - `-s`, `--slice`
 - `-c`, `--comp`
 - `--save`
+- `--x-scale`
+- `--y-scale`
 - `--plot-coeffs`
 
 ## Notes

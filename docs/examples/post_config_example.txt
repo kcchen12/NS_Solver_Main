@@ -3,7 +3,6 @@
 
 # Grid visualization
 plot = true
-plot_grid = false
 auto_generate_grid_spacing = true
 auto_generate_ibm_forcing = true
 auto_generate_vorticity_video = false

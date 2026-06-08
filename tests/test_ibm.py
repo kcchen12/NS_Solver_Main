@@ -82,6 +82,91 @@ class TestIBMCircle:
         assert self.ibm.mask_v[i_v, j_v]
         assert np.isclose(v[i_v, j_v], omega * (self.g.xc[i_v] - cx))
 
+    def test_translating_circle_imposes_linear_velocity_and_moves_mask(self):
+        cx, cy, r = 1.0, 0.75, 0.2
+        amplitude_x = 0.1
+        frequency = 0.5
+        self.ibm.add_translating_circle(
+            cx,
+            cy,
+            r,
+            amplitude_x=amplitude_x,
+            amplitude_y=0.0,
+            frequency=frequency,
+            phase=0.0,
+        )
+        u = np.zeros(self.g.u_shape)
+        v = np.zeros(self.g.v_shape)
+        self.ibm.apply(u, v, time=0.0)
+
+        expected_u = 2.0 * np.pi * frequency * amplitude_x
+        assert np.allclose(u[self.ibm.mask_u], expected_u)
+        assert np.allclose(v[self.ibm.mask_v], 0.0)
+
+        self.ibm.apply(u, v, time=0.5)
+        moved_cx = cx + amplitude_x
+        i_u = int(np.argmin(np.abs(self.g.xf - moved_cx)))
+        j_u = int(np.argmin(np.abs(self.g.yc - cy)))
+        assert self.ibm.mask_u[i_u, j_u]
+
+    def test_translating_circle_supports_vertical_motion(self):
+        cx, cy, r = 1.0, 0.75, 0.2
+        amplitude_y = 0.075
+        frequency = 0.25
+        self.ibm.add_translating_circle(
+            cx,
+            cy,
+            r,
+            amplitude_x=0.0,
+            amplitude_y=amplitude_y,
+            frequency=frequency,
+            phase=0.0,
+        )
+        u = np.zeros(self.g.u_shape)
+        v = np.zeros(self.g.v_shape)
+        self.ibm.apply(u, v, time=0.0)
+
+        expected_v = 2.0 * np.pi * frequency * amplitude_y
+        assert np.allclose(u[self.ibm.mask_u], 0.0)
+        assert np.allclose(v[self.ibm.mask_v], expected_v)
+
+    def test_translating_force_diagnostic_uses_regularized_circle_weight(self):
+        cx, cy, r = 1.0, 0.75, 0.22
+        self.ibm.add_translating_circle(
+            cx,
+            cy,
+            r,
+            amplitude_x=0.0,
+            amplitude_y=0.0,
+            frequency=0.0,
+        )
+        u = np.ones(self.g.u_shape)
+        v = np.ones(self.g.v_shape) * 2.0
+
+        force_x, force_y = self.ibm.apply(u, v, dt=1.0, rho=1.0, time=0.0)
+
+        weight_u = self.ibm._circle_force_weight(
+            self.ibm._u_x,
+            self.ibm._u_y,
+            cx,
+            cy,
+            r,
+            self.ibm._force_regularization_width,
+        )
+        weight_v = self.ibm._circle_force_weight(
+            self.ibm._v_x,
+            self.ibm._v_y,
+            cx,
+            cy,
+            r,
+            self.ibm._force_regularization_width,
+        )
+        expected_fx = np.sum(self.ibm._u_face_measure * weight_u)
+        expected_fy = np.sum(2.0 * self.ibm._v_face_measure * weight_v)
+
+        assert np.isclose(force_x, expected_fx)
+        assert np.isclose(force_y, expected_fy)
+
     def test_force_diagnostic_uses_local_face_measures_on_nonuniform_grid(self):
         xf = np.array([0.0, 0.2, 0.6, 1.0], dtype=float)
         yf = np.array([0.0, 0.1, 0.4, 1.0], dtype=float)

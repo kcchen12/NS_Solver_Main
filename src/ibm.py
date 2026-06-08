@@ -63,6 +63,35 @@ class RotatingCircleSpec:
 
 
 @dataclass
+class TranslatingCircleSpec:
+    cx: float
+    cy: float
+    radius: float
+    amplitude_x: float
+    amplitude_y: float
+    frequency: float
+    phase: float
+    mask_u: np.ndarray
+    mask_v: np.ndarray
+
+    def center(self, time: float) -> tuple[float, float]:
+        theta = 2.0 * np.pi * self.frequency * time + self.phase
+        displacement = np.sin(theta)
+        return (
+            float(self.cx + self.amplitude_x * displacement),
+            float(self.cy + self.amplitude_y * displacement),
+        )
+
+    def velocity(self, time: float) -> tuple[float, float]:
+        theta = 2.0 * np.pi * self.frequency * time + self.phase
+        scale = 2.0 * np.pi * self.frequency * np.cos(theta)
+        return (
+            float(self.amplitude_x * scale),
+            float(self.amplitude_y * scale),
+        )
+
+
+@dataclass
 class SweepingJetSpec:
     cx: float
     cy: float
@@ -128,7 +157,15 @@ class ImmersedBoundary:
         self._v_face_measure = np.broadcast_to(
             grid.dx_cells[:, np.newaxis], grid.v_shape
         )
+        self._force_regularization_width = max(
+            float(np.median(grid.dx_cells)),
+            float(np.median(grid.dy_cells)),
+            np.finfo(float).eps,
+        )
+        self._base_mask_u = np.zeros(grid.u_shape, dtype=bool)
+        self._base_mask_v = np.zeros(grid.v_shape, dtype=bool)
         self.rotating_circles: list[RotatingCircleSpec] = []
+        self.translating_circles: list[TranslatingCircleSpec] = []
         self.sweeping_jets: list[SweepingJetSpec] = []
         self.oscillating_jet_patches: list[OscillatingJetPatchSpec] = []
 
@@ -142,6 +179,19 @@ class ImmersedBoundary:
     ) -> np.ndarray:
         radius_sq = float(radius) ** 2
         return ((x_coords - cx) ** 2 + (y_coords - cy) ** 2) <= radius_sq
+
+    @staticmethod
+    def _circle_force_weight(
+        x_coords: np.ndarray,
+        y_coords: np.ndarray,
+        cx: float,
+        cy: float,
+        radius: float,
+        transition_width: float,
+    ) -> np.ndarray:
+        distance = np.sqrt((x_coords - cx) ** 2 + (y_coords - cy) ** 2)
+        width = max(float(transition_width), np.finfo(float).eps)
+        return np.clip(0.5 + (float(radius) - distance) / width, 0.0, 1.0)
 
     @staticmethod
     def _top_indent_mask(
@@ -409,8 +459,12 @@ class ImmersedBoundary:
             Prescribed velocity on the body surface (0 for stationary wall).
         """
         del u_body, v_body
-        self.mask_u |= self._circle_mask(self._u_x, self._u_y, cx, cy, radius)
-        self.mask_v |= self._circle_mask(self._v_x, self._v_y, cx, cy, radius)
+        mask_u = self._circle_mask(self._u_x, self._u_y, cx, cy, radius)
+        mask_v = self._circle_mask(self._v_x, self._v_y, cx, cy, radius)
+        self._base_mask_u |= mask_u
+        self._base_mask_v |= mask_v
+        self.mask_u |= mask_u
+        self.mask_v |= mask_v
 
     def add_circle_with_top_indent(
         self,
@@ -445,6 +499,8 @@ class ImmersedBoundary:
             indent_width=indent_width,
             indent_depth=indent_depth,
         )
+        self._base_mask_u |= mask_u
+        self._base_mask_v |= mask_v
         self.mask_u |= mask_u
         self.mask_v |= mask_v
 
@@ -471,6 +527,8 @@ class ImmersedBoundary:
         mask_u = self._circle_mask(self._u_x, self._u_y, cx, cy, radius)
         mask_v = self._circle_mask(self._v_x, self._v_y, cx, cy, radius)
 
+        self._base_mask_u |= mask_u
+        self._base_mask_v |= mask_v
         self.mask_u |= mask_u
         self.mask_v |= mask_v
         self.rotating_circles.append(
@@ -513,6 +571,48 @@ class ImmersedBoundary:
             omega_amplitude=float(omega),
             frequency=0.0,
             phase=0.5 * np.pi,
+        )
+
+    def add_translating_circle(
+        self,
+        cx: float,
+        cy: float,
+        radius: float,
+        amplitude_x: float,
+        amplitude_y: float,
+        frequency: float,
+        phase: float = 0.0,
+    ) -> None:
+        """Add a non-rotating circular cylinder with sinusoidal translation.
+
+        The center follows
+
+            x_c(t) = cx + amplitude_x * sin(2*pi*frequency*t + phase)
+            y_c(t) = cy + amplitude_y * sin(2*pi*frequency*t + phase)
+
+        and the imposed wall velocity is the matching rigid-body
+        translational velocity.
+        """
+        if radius <= 0.0:
+            raise ValueError("radius must be positive")
+        if frequency < 0.0:
+            raise ValueError("frequency must be non-negative")
+        mask_u = self._circle_mask(self._u_x, self._u_y, cx, cy, radius)
+        mask_v = self._circle_mask(self._v_x, self._v_y, cx, cy, radius)
+        self.mask_u = self._base_mask_u | mask_u
+        self.mask_v = self._base_mask_v | mask_v
+        self.translating_circles.append(
+            TranslatingCircleSpec(
+                cx=float(cx),
+                cy=float(cy),
+                radius=float(radius),
+                amplitude_x=float(amplitude_x),
+                amplitude_y=float(amplitude_y),
+                frequency=float(frequency),
+                phase=float(phase),
+                mask_u=mask_u,
+                mask_v=mask_v,
+            )
         )
 
     def add_sweeping_jet_circle(
@@ -785,18 +885,22 @@ class ImmersedBoundary:
         """
         del u_body, v_body
         grid = self.grid
-        self.mask_u |= (
+        mask_u = (
             (grid.xf[:, np.newaxis] >= x0)
             & (grid.xf[:, np.newaxis] <= x1)
             & (grid.yc[np.newaxis, :] >= y0)
             & (grid.yc[np.newaxis, :] <= y1)
         )
-        self.mask_v |= (
+        mask_v = (
             (grid.xc[:, np.newaxis] >= x0)
             & (grid.xc[:, np.newaxis] <= x1)
             & (grid.yf[np.newaxis, :] >= y0)
             & (grid.yf[np.newaxis, :] <= y1)
         )
+        self._base_mask_u |= mask_u
+        self._base_mask_v |= mask_v
+        self.mask_u |= mask_u
+        self.mask_v |= mask_v
 
     def add_mask(self, mask_u: np.ndarray, mask_v: np.ndarray) -> None:
         """
@@ -810,8 +914,59 @@ class ImmersedBoundary:
             raise ValueError(
                 f"mask_v must have shape {self.grid.v_shape}, got {mask_v.shape}"
             )
+        self._base_mask_u |= mask_u
+        self._base_mask_v |= mask_v
         self.mask_u |= mask_u
         self.mask_v |= mask_v
+
+    def _refresh_translating_circles(self, time: float) -> None:
+        if not self.translating_circles:
+            return
+        self.mask_u = self._base_mask_u.copy()
+        self.mask_v = self._base_mask_v.copy()
+        for spec in self.translating_circles:
+            cx, cy = spec.center(time)
+            spec.mask_u = self._circle_mask(self._u_x, self._u_y, cx, cy, spec.radius)
+            spec.mask_v = self._circle_mask(self._v_x, self._v_y, cx, cy, spec.radius)
+            self.mask_u |= spec.mask_u
+            self.mask_v |= spec.mask_v
+
+    def _compute_translating_circle_force(
+        self,
+        u: np.ndarray,
+        v: np.ndarray,
+        time: float,
+        dt: float,
+        rho: float,
+    ) -> tuple[float, float]:
+        force_x = 0.0
+        force_y = 0.0
+        for spec in self.translating_circles:
+            cx, cy = spec.center(time)
+            u_body_t, v_body_t = spec.velocity(time)
+            weight_u = self._circle_force_weight(
+                self._u_x,
+                self._u_y,
+                cx,
+                cy,
+                spec.radius,
+                self._force_regularization_width,
+            )
+            weight_v = self._circle_force_weight(
+                self._v_x,
+                self._v_y,
+                cx,
+                cy,
+                spec.radius,
+                self._force_regularization_width,
+            )
+            force_x += float(
+                np.sum((u - u_body_t) * self._u_face_measure * weight_u)
+            )
+            force_y += float(
+                np.sum((v - v_body_t) * self._v_face_measure * weight_v)
+            )
+        return rho * force_x / dt, rho * force_y / dt
 
     # ------------------------------------------------------------------
     # Forcing
@@ -835,8 +990,19 @@ class ImmersedBoundary:
         forcing_v = None
         u_target = np.full_like(u, float(u_body))
         v_target = np.full_like(v, float(v_body))
+        self._refresh_translating_circles(time)
         enforce_u_mask = self.mask_u
         enforce_v_mask = self.mask_v
+
+        if self.translating_circles:
+            enforce_u_mask = self.mask_u.copy()
+            enforce_v_mask = self.mask_v.copy()
+            for spec in self.translating_circles:
+                u_body_t, v_body_t = spec.velocity(time)
+                u_target[spec.mask_u] = u_body_t
+                v_target[spec.mask_v] = v_body_t
+                enforce_u_mask |= spec.mask_u
+                enforce_v_mask |= spec.mask_v
 
         if self.rotating_circles:
             for spec in self.rotating_circles:
@@ -870,26 +1036,35 @@ class ImmersedBoundary:
                 enforce_v_mask |= spec.mask_v
 
         if dt is not None and dt > 0.0:
-            force_x = (
-                rho
-                * float(
-                    np.sum(
-                        (u[enforce_u_mask] - u_target[enforce_u_mask])
-                        * self._u_face_measure[enforce_u_mask]
-                    )
+            if self.translating_circles:
+                force_x, force_y = self._compute_translating_circle_force(
+                    u,
+                    v,
+                    time=time,
+                    dt=dt,
+                    rho=rho,
                 )
-                / dt
-            )
-            force_y = (
-                rho
-                * float(
-                    np.sum(
-                        (v[enforce_v_mask] - v_target[enforce_v_mask])
-                        * self._v_face_measure[enforce_v_mask]
+            else:
+                force_x = (
+                    rho
+                    * float(
+                        np.sum(
+                            (u[enforce_u_mask] - u_target[enforce_u_mask])
+                            * self._u_face_measure[enforce_u_mask]
+                        )
                     )
+                    / dt
                 )
-                / dt
-            )
+                force_y = (
+                    rho
+                    * float(
+                        np.sum(
+                            (v[enforce_v_mask] - v_target[enforce_v_mask])
+                            * self._v_face_measure[enforce_v_mask]
+                        )
+                    )
+                    / dt
+                )
             if return_face_forcing:
                 forcing_u = np.zeros_like(u)
                 forcing_v = np.zeros_like(v)

@@ -60,7 +60,7 @@ from analyze_aerodynamics import (
     plot_shedding_spectrum,
     save_pressure_coefficient_report,
 )
-from time_average_snapshots import save_time_averaged_fields
+from time_average_snapshots import plot_time_averaged_fields, save_time_averaged_fields
 from view_snapshot_viewer import find_latest_snapshot, plot_coeff_history
 from view_snapshot_viewer import plot_ibm_forcing, plot_vorticity_video
 
@@ -95,6 +95,27 @@ def _normalize_cylinder_rotation_mode(raw_value: str | None) -> str:
     }
     value = aliases.get(value, value)
     return value if value in {"stationary", "oscillatory", "constant"} else "stationary"
+
+
+def _normalize_cylinder_translation_mode(raw_value: str | None) -> str:
+    value = "stationary" if raw_value is None else str(raw_value).strip().lower()
+    aliases = {
+        "none": "stationary",
+        "off": "stationary",
+        "fixed": "stationary",
+        "left-right": "oscillatory-x",
+        "left_right": "oscillatory-x",
+        "horizontal": "oscillatory-x",
+        "up-down": "oscillatory-y",
+        "up_down": "oscillatory-y",
+        "vertical": "oscillatory-y",
+        "xy": "oscillatory-xy",
+        "both": "oscillatory-xy",
+        "oscillatory": "oscillatory-xy",
+    }
+    value = aliases.get(value, value)
+    valid = {"stationary", "oscillatory-x", "oscillatory-y", "oscillatory-xy"}
+    return value if value in valid else "stationary"
 
 
 def _normalize_ibm_shape(raw_value: str | None) -> str:
@@ -389,11 +410,44 @@ def parse_args():
     p.add_argument("--cylinder-rotation-phase-deg", type=float,
                    default=cfg.get("cylinder_rotation_phase_deg", 0.0, float),
                    help="Phase offset in degrees for oscillatory cylinder rotation")
+    translation_amplitude_percent_default = cfg.get(
+        "cylinder_translation_amplitude_percent", 10.0, float
+    )
+    p.add_argument("--cylinder-translation-mode", type=str,
+                   choices=[
+                       "stationary",
+                       "oscillatory-x",
+                       "oscillatory-y",
+                       "oscillatory-xy",
+                   ],
+                   default=_normalize_cylinder_translation_mode(
+                       cfg.get("cylinder_translation_mode", "stationary", str)),
+                   help="Non-rotating cylinder translation mode")
+    p.add_argument("--cylinder-translation-amplitude-percent", type=float,
+                   default=translation_amplitude_percent_default,
+                   help="Default translation amplitude as percent of cylinder diameter")
+    p.add_argument("--cylinder-translation-x-percent", type=float,
+                   default=cfg.get(
+                       "cylinder_translation_x_percent",
+                       translation_amplitude_percent_default,
+                       float,
+                   ),
+                   help="Left/right translation amplitude as percent of cylinder diameter")
+    p.add_argument("--cylinder-translation-y-percent", type=float,
+                   default=cfg.get(
+                       "cylinder_translation_y_percent",
+                       translation_amplitude_percent_default,
+                       float,
+                   ),
+                   help="Up/down translation amplitude as percent of cylinder diameter")
+    p.add_argument("--cylinder-translation-frequency", type=float,
+                   default=cfg.get("cylinder_translation_frequency", 0.0, float),
+                   help="Oscillation frequency for cylinder translation")
+    p.add_argument("--cylinder-translation-phase-deg", type=float,
+                   default=cfg.get("cylinder_translation_phase_deg", 0.0, float),
+                   help="Phase offset in degrees for oscillatory cylinder translation")
     p.add_argument("--plot",     type=str_to_bool, default=post_cfg.get("plot", False, bool),
                    help="Save the standard end-of-run result figure")
-    p.add_argument("--plot-grid", type=str_to_bool,
-                   default=post_cfg.get("plot_grid", False, bool),
-                   help="Save a physical grid plot showing mesh concentration")
     p.add_argument("--auto-generate-grid-spacing", type=str_to_bool,
                    default=post_cfg.get(
                        "auto_generate_grid_spacing", False, bool),
@@ -418,6 +472,10 @@ def parse_args():
                    default=post_cfg.get(
                        "auto_generate_time_averaged_fields", False, bool),
                    help="Automatically save time-averaged mean/RMS fields from output snapshots")
+    p.add_argument("--auto-generate-time-averaged-plots", type=str_to_bool,
+                   default=post_cfg.get(
+                       "auto_generate_time_averaged_plots", False, bool),
+                   help="Automatically save a readable PNG summary of the time-averaged fields")
     p.add_argument("--auto-generate-ibm-forcing", type=str_to_bool,
                    default=post_cfg.get(
                        "auto_generate_ibm_forcing", False, bool),
@@ -452,8 +510,8 @@ def parse_args():
     p.add_argument("--inflow-v", type=float,
                    default=cfg.get("inflow_v", 0.0, float),
                    help="Inflow/farfield y-velocity component")
-    p.add_argument("--initial-v-perturbation-pct", type=float,
-                   default=cfg.get("initial_v_perturbation_pct", 0.0, float),
+    p.add_argument("--initial-v-perturbation-percent", type=float,
+                   default=cfg.get("initial_v_perturbation_percent", 0.0, float),
                    help="One-time initial y-velocity perturbation as a percent of inflow_u")
     p.add_argument("--inflow-w", type=float,
                    default=cfg.get("inflow_w", 0.0, float),
@@ -542,6 +600,63 @@ def _resolve_cylinder_geometry(args) -> tuple[float, float, float]:
     cy = args.cylinder_center_y if args.cylinder_center_y >= 0.0 else args.y_min + 0.5 * args.ly
     radius = args.cylinder_radius if args.cylinder_radius > 0.0 else args.ly / 8.0
     return cx, cy, radius
+
+
+def _resolve_cylinder_translation(args, cx: float, cy: float, radius: float) -> dict:
+    mode = _normalize_cylinder_translation_mode(args.cylinder_translation_mode)
+    diameter = 2.0 * float(radius)
+    x_percent = max(float(args.cylinder_translation_x_percent), 0.0)
+    y_percent = max(float(args.cylinder_translation_y_percent), 0.0)
+
+    amplitude_x = 0.01 * x_percent * diameter if mode in {"oscillatory-x", "oscillatory-xy"} else 0.0
+    amplitude_y = 0.01 * y_percent * diameter if mode in {"oscillatory-y", "oscillatory-xy"} else 0.0
+    frequency = max(float(args.cylinder_translation_frequency), 0.0)
+
+    if mode != "stationary" and frequency <= 0.0:
+        raise ValueError("cylinder translation requires a positive frequency")
+
+    if (
+        mode != "stationary"
+        and args.grid_type == "nonuniform"
+        and args.uniform_x_start is not None
+        and args.uniform_y_start is not None
+    ):
+        x0, x1, y0, y1 = _expected_nonuniform_band(args)
+        swept_x0 = cx - radius - amplitude_x
+        swept_x1 = cx + radius + amplitude_x
+        swept_y0 = cy - radius - amplitude_y
+        swept_y1 = cy + radius + amplitude_y
+        if swept_x0 < x0 or swept_x1 > x1 or swept_y0 < y0 or swept_y1 > y1:
+            raise ValueError(
+                "moving cylinder sweep must stay inside the concentrated mesh "
+                f"core: sweep=({swept_x0:.4g},{swept_x1:.4g}) x "
+                f"({swept_y0:.4g},{swept_y1:.4g}), core=({x0:.4g},{x1:.4g}) x "
+                f"({y0:.4g},{y1:.4g})"
+            )
+
+    return {
+        "mode": mode,
+        "amplitude_x": amplitude_x,
+        "amplitude_y": amplitude_y,
+        "frequency": frequency,
+        "phase_rad": np.deg2rad(float(args.cylinder_translation_phase_deg)),
+        "x_percent": x_percent,
+        "y_percent": y_percent,
+    }
+
+
+def _cylinder_center_at_time(args, time: float) -> tuple[float, float, float]:
+    cx, cy, radius = _resolve_cylinder_geometry(args)
+    cfg = _resolve_cylinder_translation(args, cx, cy, radius)
+    if cfg["mode"] == "stationary":
+        return cx, cy, radius
+    theta = 2.0 * np.pi * cfg["frequency"] * float(time) + cfg["phase_rad"]
+    displacement = np.sin(theta)
+    return (
+        float(cx + cfg["amplitude_x"] * displacement),
+        float(cy + cfg["amplitude_y"] * displacement),
+        radius,
+    )
 
 
 def _resolve_indent_geometry(args, radius: float) -> tuple[float, float]:
@@ -668,7 +783,13 @@ def _resolve_experiment_overrides(args) -> tuple[str, str]:
     return shape, actuation
 
 
-def _plot_ibm_outline(ax, args, color: str = "white", linewidth: float = 1.6) -> None:
+def _plot_ibm_outline(
+    ax,
+    args,
+    color: str = "white",
+    linewidth: float = 1.6,
+    time: float = 0.0,
+) -> None:
     def local_box_points(
         center_x: float,
         center_y: float,
@@ -737,7 +858,7 @@ def _plot_ibm_outline(ax, args, color: str = "white", linewidth: float = 1.6) ->
         ]
         return x_pts, y_pts
 
-    cx, cy, radius = _resolve_cylinder_geometry(args)
+    cx, cy, radius = _cylinder_center_at_time(args, time)
     shape, actuation_mode = _resolve_experiment_overrides(args)
     theta = np.linspace(0.0, 2.0 * np.pi, 361)
     x = cx + radius * np.cos(theta)
@@ -931,17 +1052,28 @@ def _kinematic_viscosity(args, inflow_u: float, cylinder_radius: float | None) -
 
 
 def _snapshot_metadata(args, solver) -> dict:
-    return {
+    metadata = {
         "t": solver.t,
         "nx": args.nx,
         "ny": args.ny,
         "lx": args.lx,
         "ly": args.ly,
+        "x_min": args.x_min,
+        "x_max": args.x_max,
+        "y_min": args.y_min,
+        "y_max": args.y_max,
         "re": args.re,
         "ibm_force_x": solver.last_ibm_force_x,
         "ibm_force_y": solver.last_ibm_force_y,
+        "cylinder_enabled": bool(args.cylinder),
         "cylinder_omega": _cylinder_angular_velocity(args, solver.t),
     }
+    if args.cylinder:
+        cx, cy, radius = _cylinder_center_at_time(args, solver.t)
+        metadata["cylinder_center_x"] = cx
+        metadata["cylinder_center_y"] = cy
+        metadata["cylinder_radius"] = radius
+    return metadata
 
 
 def _snapshot_extra_fields(solver) -> dict:
@@ -1148,9 +1280,19 @@ def run(args, grid=None, grid_loaded_from_file=False):
         cx, cy, r = _resolve_cylinder_geometry(args)
         ibm_shape, actuation_mode = _resolve_experiment_overrides(args)
         rotation_mode = _normalize_cylinder_rotation_mode(args.cylinder_rotation_mode)
+        translation_cfg = _resolve_cylinder_translation(args, cx, cy, r)
+        translation_mode = translation_cfg["mode"]
         if ibm_shape != "circle" and rotation_mode != "stationary":
             raise ValueError(
                 "circle-with-top-indent currently supports stationary IBM bodies only"
+            )
+        if ibm_shape != "circle" and translation_mode != "stationary":
+            raise ValueError(
+                "circle-with-top-indent currently supports stationary IBM bodies only"
+            )
+        if rotation_mode != "stationary" and translation_mode != "stationary":
+            raise ValueError(
+                "cylinder rotation and cylinder translation are mutually exclusive"
             )
         if actuation_mode != "none" and ibm_shape != "circle":
             raise ValueError(
@@ -1160,7 +1302,21 @@ def run(args, grid=None, grid_loaded_from_file=False):
             raise ValueError(
                 "jet actuation currently supports stationary cylinders only"
             )
-        if rotation_mode == "oscillatory":
+        if actuation_mode != "none" and translation_mode != "stationary":
+            raise ValueError(
+                "jet actuation currently supports stationary cylinders only"
+            )
+        if translation_mode != "stationary":
+            ibm.add_translating_circle(
+                cx,
+                cy,
+                r,
+                amplitude_x=translation_cfg["amplitude_x"],
+                amplitude_y=translation_cfg["amplitude_y"],
+                frequency=translation_cfg["frequency"],
+                phase=translation_cfg["phase_rad"],
+            )
+        elif rotation_mode == "oscillatory":
             ibm.add_rotating_circle(
                 cx,
                 cy,
@@ -1272,6 +1428,17 @@ def run(args, grid=None, grid_loaded_from_file=False):
                     "  Cylinder rot.: "
                     f"omega(t)={args.cylinder_rotation_amplitude:.4g}"
                 )
+            if translation_mode != "stationary":
+                print(
+                    "  Cylinder move: "
+                    f"mode={translation_mode}, "
+                    f"Ax={translation_cfg['amplitude_x']:.4g} "
+                    f"({translation_cfg['x_percent']:.4g}% D), "
+                    f"Ay={translation_cfg['amplitude_y']:.4g} "
+                    f"({translation_cfg['y_percent']:.4g}% D), "
+                    f"f={translation_cfg['frequency']:.4g}, "
+                    f"phase={args.cylinder_translation_phase_deg:.4g} deg"
+                )
 
     # ------------------------------------------------------------------
     # Solver
@@ -1284,17 +1451,17 @@ def run(args, grid=None, grid_loaded_from_file=False):
             f"  Re interpretation: Re_D={args.re} with D={d_cyl:.4f} -> nu={nu:.6g}")
 
     initial_v_perturbation = 0.01 * \
-        args.initial_v_perturbation_pct * bc.u_inf
+        args.initial_v_perturbation_percent * bc.u_inf
     solver = FractionalStepSolver(grid, bc, nu, ibm=ibm)
     solver.init_fields(
         u0=bc.u_inf,
         v0=bc.v_inf,
         initial_v_perturbation=initial_v_perturbation,
     )
-    if is_root and args.verbose and args.initial_v_perturbation_pct != 0.0:
+    if is_root and args.verbose and args.initial_v_perturbation_percent != 0.0:
         print(
             "  Initial v perturbation: "
-            f"{args.initial_v_perturbation_pct:.3g}% of inflow_u "
+            f"{args.initial_v_perturbation_percent:.3g}% of inflow_u "
             f"-> dv={initial_v_perturbation:.6g}"
         )
 
@@ -1348,8 +1515,6 @@ def run(args, grid=None, grid_loaded_from_file=False):
     # ------------------------------------------------------------------
     # Optional plot
     # ------------------------------------------------------------------
-    if args.plot_grid and is_root:
-        _plot_grid(grid, args)
     if args.plot and is_root:
         _plot_results(solver, grid, args)
 
@@ -1389,7 +1554,7 @@ def _plot_results(solver, grid, args):
         # Draw the immersed cylinder on every panel so geometry alignment
         # is visible in vorticity, pressure, and velocity plots.
         for ax in axes:
-            _plot_ibm_outline(ax, args, color="black", linewidth=1.6)
+            _plot_ibm_outline(ax, args, color="black", linewidth=1.6, time=solver.t)
 
     # Vorticity: use robust clipping + high-contrast diverging map
     # so coherent structures are easier to read.
@@ -1659,9 +1824,9 @@ def _run_auto_outputs(grid, args):
         except Exception as exc:
             print(f"  Warning: automatic vorticity video failed: {exc}")
 
-    if args.auto_generate_time_averaged_fields:
+    if args.auto_generate_time_averaged_fields or args.auto_generate_time_averaged_plots:
         try:
-            save_time_averaged_fields(
+            averaged_path = save_time_averaged_fields(
                 indir=args.outdir,
                 t_min=args.auto_aero_t_min,
                 results_dir=results_dir,
@@ -1671,6 +1836,13 @@ def _run_auto_outputs(grid, args):
                 f"Saved time-averaged fields: "
                 f"{os.path.join(results_dir, 'time_averaged_fields.npz')}"
             )
+            if args.auto_generate_time_averaged_plots:
+                plot_path = plot_time_averaged_fields(
+                    averaged_path,
+                    save_name="time_averaged_fields.png",
+                    results_dir=results_dir,
+                )
+                print(f"Saved time-averaged field plot: {plot_path}")
         except Exception as exc:
             print(f"  Warning: automatic time-averaged fields failed: {exc}")
 

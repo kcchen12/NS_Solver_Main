@@ -28,7 +28,7 @@ bc_top = farfield
 # Inflow/farfield velocity components
 inflow_u = 1.0
 inflow_v = 0.0
-initial_v_perturbation_pct = 0.0
+initial_v_perturbation_percent = 2.0
 inflow_w = 0.0
 # Farfield behavior (used where face type is 'farfield')
 # farfield_mode: dirichlet | neumann
@@ -81,9 +81,23 @@ re_is_cylinder_based = true
 #   stationary  -> fixed_cylinder
 #   constant    -> one-direction constant angular velocity
 #   oscillatory -> back-and-forth sinusoidal angular velocity
-cylinder_rotation_mode = oscillatory
+cylinder_rotation_mode = fixed_cylinder
 # omega(t) = amplitude  for constant
 # omega(t) = amplitude * sin(2*pi*frequency*t + phase) for oscillatory
 cylinder_rotation_amplitude = 0.4
-cylinder_rotation_frequency = 0.626
+cylinder_rotation_frequency = 0.081
 cylinder_rotation_phase_deg = 0.0
+
+# Cylinder translation (non-rotating moving cylinder)
+#   stationary     -> fixed center
+#   oscillatory-x  -> left/right sinusoidal center motion
+#   oscillatory-y  -> up/down sinusoidal center motion
+#   oscillatory-xy -> left/right and up/down sinusoidal center motion
+# Amplitudes are percentages of cylinder diameter; 10% keeps a small sweep
+# inside the concentrated mesh when the uniform core is sized around the body.
+cylinder_translation_mode = oscillatory-y
+cylinder_translation_amplitude_percent = 10.0
+cylinder_translation_x_percent = 10.0
+cylinder_translation_y_percent = 10.0
+cylinder_translation_frequency = 0.081
+cylinder_translation_phase_deg = 0.0

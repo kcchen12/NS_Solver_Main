@@ -242,6 +242,21 @@ def _estimate_cylinder_geometry(
     )
 
 
+def _snapshot_cylinder_geometry(
+    data: np.lib.npyio.NpzFile,
+    fallback: CylinderGeometry,
+) -> CylinderGeometry:
+    """Return per-snapshot cylinder geometry when moving-body metadata exists."""
+    center_x = _safe_scalar(data, "meta_cylinder_center_x")
+    center_y = _safe_scalar(data, "meta_cylinder_center_y")
+    radius = _safe_scalar(data, "meta_cylinder_radius")
+    return CylinderGeometry(
+        center_x=fallback.center_x if center_x is None else float(center_x),
+        center_y=fallback.center_y if center_y is None else float(center_y),
+        radius=fallback.radius if radius is None else float(radius),
+    )
+
+
 def _build_bilinear_plan(
     x_grid: np.ndarray,
     y_grid: np.ndarray,
@@ -492,13 +507,16 @@ def _compute_pressure_forces(
 
 def _compute_forces(
     snapshot_path: str,
-    force_plan: SurfaceForcePlan,
+    xc: np.ndarray,
+    yc: np.ndarray,
+    geom: CylinderGeometry,
+    force_source: str = "ibm",
 ) -> Tuple[float, float]:
     """Compute x and y forces from a single snapshot."""
     with np.load(snapshot_path, allow_pickle=False) as data:
         fx_meta = _safe_scalar(data, "meta_ibm_force_x")
         fy_meta = _safe_scalar(data, "meta_ibm_force_y")
-        if fx_meta is not None and fy_meta is not None:
+        if force_source == "ibm" and fx_meta is not None and fy_meta is not None:
             return float(fx_meta), float(fy_meta)
         if "p" not in data.files:
             available = ", ".join(sorted(data.files))
@@ -507,6 +525,9 @@ def _compute_forces(
                 f"'p'. Available fields: {available}"
             )
         p = data["p"]
+        snapshot_geom = _snapshot_cylinder_geometry(data, geom)
+
+    force_plan = _build_surface_force_plan(xc, yc, snapshot_geom)
     return _compute_pressure_forces(p, force_plan)
 
 
@@ -586,13 +607,8 @@ def plot_shedding_spectrum(
 
     _, _, freq_band, power_band = out
     peak_indices = _find_top_spectral_peaks(freq_band, power_band, max_peaks=3)
-    power_floor = max(float(np.max(power_band)) * 1e-12, np.finfo(float).tiny)
-    power_display = np.maximum(power_band, power_floor)
-
     fig, ax = plt.subplots(figsize=(9, 5.5))
-    ax.plot(freq_band, power_display, color="tab:blue", linewidth=1.8)
-    ax.set_xscale("log")
-    ax.set_yscale("log")
+    ax.loglog(freq_band, power_band, color="tab:blue", linewidth=1.8)
     ax.set_xlabel("Frequency")
     ax.set_ylabel("Fourier energy")
     ax.set_title(
@@ -602,10 +618,10 @@ def plot_shedding_spectrum(
     )
     ax.grid(True, alpha=0.3)
 
-    ymax = float(np.max(power_display)) if power_display.size else 1.0
+    ymax = float(np.max(power_band)) if power_band.size else 1.0
     for rank, idx in enumerate(peak_indices, start=1):
         f_peak = float(freq_band[idx])
-        p_peak = float(power_display[idx])
+        p_peak = float(power_band[idx])
         ax.scatter([f_peak], [p_peak], color="crimson", zorder=3)
         label = f"#{rank}: f={f_peak:.4g}"
         if char_length is not None and u_ref is not None and u_ref > 0.0:
@@ -622,7 +638,10 @@ def plot_shedding_spectrum(
         )
 
     ax.set_xlim(float(freq_band[0]), float(freq_band[-1]))
-    ax.set_ylim(bottom=power_floor, top=max(1.05 * ymax, power_floor * 10.0))
+    ax.set_ylim(
+        bottom=max(float(np.min(power_band)), np.finfo(float).eps),
+        top=max(1.05 * ymax, np.finfo(float).eps),
+    )
     fig.tight_layout()
 
     os.makedirs(DEFAULT_RESULTS_DIR, exist_ok=True)
@@ -764,6 +783,7 @@ def _extract_combined_series(
     geom: CylinderGeometry,
     u_ref: float,
     char_length: float,
+    force_source: str = "ibm",
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Extract optional probe series and force/coefficient histories.
 
@@ -773,8 +793,9 @@ def _extract_combined_series(
     t, u_probe, v_probe, p_probe = _extract_probe_series(
         snapshots, nx, ny, lx, ly, probe_x, probe_y
     )
-    _, xc, _, yc = _build_uniform_face_and_center_coords(nx, ny, lx, ly)
-    force_plan = _build_surface_force_plan(xc, yc, geom)
+    xf, yf = _load_grid_faces_for_snapshot(snapshots[0][1], nx=nx, ny=ny)
+    xc = 0.5 * (xf[:-1] + xf[1:])
+    yc = 0.5 * (yf[:-1] + yf[1:])
 
     n = len(snapshots)
     f_x_arr = np.empty(n, dtype=float)
@@ -783,7 +804,13 @@ def _extract_combined_series(
     c_l_arr = np.empty(n, dtype=float)
 
     for k, (_, path) in enumerate(snapshots):
-        f_x, f_y = _compute_forces(path, force_plan)
+        f_x, f_y = _compute_forces(
+            path,
+            xc=xc,
+            yc=yc,
+            geom=geom,
+            force_source=force_source,
+        )
         c_d, c_l = _compute_coefficients(f_x, f_y, u_ref, char_length)
         f_x_arr[k] = f_x
         f_y_arr[k] = f_y
@@ -817,6 +844,12 @@ def parse_args() -> argparse.Namespace:
                         help="Use L = 2*cylinder_radius from config (or ly/4 if radius is default)")
     parser.add_argument("--cylinder-radius", type=float, default=None,
                         help="Cylinder radius (default: read from config or ly/8)")
+    parser.add_argument("--force-source", choices=("ibm", "pressure"), default="ibm",
+                        help=(
+                            "Force source: ibm uses saved direct-forcing metadata "
+                            "(default); pressure integrates pressure around the "
+                            "per-snapshot cylinder surface"
+                        ))
 
     parser.add_argument("--t-min", type=float, default=1.0,
                         help="Ignore data before this time for frequency fit (default: 1.0)")
@@ -850,6 +883,7 @@ def run_analysis(
     f_max: float = 2.0,
     save_series: Optional[str] = None,
     save_report: Optional[str] = os.path.join(DEFAULT_RESULTS_DIR, "aero_report.txt"),
+    force_source: str = "ibm",
 ) -> int:
     """Run aerodynamic post-processing programmatically."""
     snapshots = _collect_snapshots(indir, pattern)
@@ -894,6 +928,7 @@ def run_analysis(
         geom=geom,
         u_ref=u_ref,
         char_length=l_char,
+        force_source=force_source,
     )
 
     if save_series:
@@ -937,6 +972,7 @@ def run_analysis(
         print(f"Probe location    : ({probe_x:.6g}, {probe_y:.6g})")
     print(f"Cylinder center   : ({geom.center_x:.6g}, {geom.center_y:.6g})")
     print(f"Cylinder radius   : {geom.radius:.6g}")
+    print(f"Force source      : {force_source}")
     print(f"Char. length (L)  : {l_char:.6g}")
     print(f"Ref. velocity (U) : {u_ref:.6g}")
     print()
@@ -988,6 +1024,7 @@ def run_analysis(
             f"Time span         : [{t.min():.4f}, {t.max():.4f}]",
             f"Cylinder center   : ({geom.center_x:.6g}, {geom.center_y:.6g})",
             f"Cylinder radius   : {geom.radius:.6g}",
+            f"Force source      : {force_source}",
             f"Char. length (L)  : {l_char:.6g}",
             f"Ref. velocity (U) : {u_ref:.6g}",
             "",
@@ -1059,6 +1096,7 @@ def main() -> int:
         f_max=args.f_max,
         save_series=args.save_series,
         save_report=args.save_report,
+        force_source=args.force_source,
     )
 
 

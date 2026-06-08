@@ -39,6 +39,35 @@ from src.config import ConfigParser
 DEFAULT_RESULTS_DIR = "results"
 
 
+def _validate_axis_scales(
+    x_scale: float = 1.0,
+    y_scale: float = 1.0,
+) -> tuple[float, float]:
+    """Validate independent display scale factors for x and y."""
+    x_scale = float(x_scale)
+    y_scale = float(y_scale)
+    if x_scale <= 0.0 or y_scale <= 0.0:
+        raise ValueError("x_scale and y_scale must both be positive.")
+    return x_scale, y_scale
+
+
+def _axis_aspect(x_scale: float = 1.0, y_scale: float = 1.0) -> float:
+    """Return the matplotlib aspect ratio for requested x/y display scaling."""
+    x_scale, y_scale = _validate_axis_scales(x_scale=x_scale, y_scale=y_scale)
+    return y_scale / x_scale
+
+
+def _scaled_figsize(
+    width: float,
+    height: float,
+    x_scale: float = 1.0,
+    y_scale: float = 1.0,
+) -> tuple[float, float]:
+    """Scale figure width/height independently to match the requested view."""
+    x_scale, y_scale = _validate_axis_scales(x_scale=x_scale, y_scale=y_scale)
+    return width * x_scale, height * y_scale
+
+
 def _load_cylinder_overlay_geometry(
     config_path: str = "config.txt",
 ) -> tuple[float, float, float] | None:
@@ -66,6 +95,30 @@ def _load_cylinder_overlay_geometry(
         radius = ly / 8.0
 
     return float(cx), float(cy), float(radius)
+
+
+def _load_cylinder_overlay_geometry_for_snapshot(
+    file_path: str,
+    config_path: str = "config.txt",
+) -> tuple[float, float, float] | None:
+    """Load cylinder overlay geometry, preferring the snapshot's runtime metadata."""
+    try:
+        with np.load(file_path, allow_pickle=False) as data:
+            enabled = data.get("meta_cylinder_enabled")
+            cx = data.get("meta_cylinder_center_x")
+            cy = data.get("meta_cylinder_center_y")
+            radius = data.get("meta_cylinder_radius")
+            if enabled is not None and bool(np.asarray(enabled).item()):
+                if cx is not None and cy is not None and radius is not None:
+                    return (
+                        float(np.asarray(cx).item()),
+                        float(np.asarray(cy).item()),
+                        float(np.asarray(radius).item()),
+                    )
+    except Exception:
+        pass
+
+    return _load_cylinder_overlay_geometry(config_path=config_path)
 
 
 def ensure_results_dir(results_dir: str = "results") -> str:
@@ -364,6 +417,8 @@ def plot_snapshot_key(
     save_name: Optional[str] = None,
     slice_idx: Optional[int] = None,
     comp_idx: Optional[int] = None,
+    x_scale: float = 1.0,
+    y_scale: float = 1.0,
 ) -> None:
     """Plot one array key from a snapshot file."""
     if not os.path.exists(file_path):
@@ -377,8 +432,10 @@ def plot_snapshot_key(
 
     img = pick_slice_and_component(arr, slice_idx, comp_idx)
 
-    fig, ax = plt.subplots(figsize=(8, 6))
-    im = ax.imshow(img, origin="lower", cmap="viridis")
+    figsize = _scaled_figsize(8.0, 6.0, x_scale=x_scale, y_scale=y_scale)
+    aspect = _axis_aspect(x_scale=x_scale, y_scale=y_scale)
+    fig, ax = plt.subplots(figsize=figsize)
+    im = ax.imshow(img, origin="lower", cmap="viridis", aspect=aspect)
     ax.set_title(f"{os.path.basename(file_path)} : {key}",
                  fontsize=12, fontweight='bold')
     fig.colorbar(im, ax=ax, label=key)
@@ -460,11 +517,17 @@ def plot_vorticity_video(
     times: list[float] = []
     skipped: list[str] = []
     xc = yc = None
+    xf = yf = None
     max_abs_omega = 0.0
 
     for idx, path in enumerate(paths, start=1):
         try:
             xc_i, yc_i, omega = _compute_snapshot_vorticity(path)
+            if xf is None or yf is None:
+                nx, ny = omega.shape
+                xf_i, yf_i = _load_grid_faces_for_snapshot(path, nx=nx, ny=ny)
+                xf = np.asarray(xf_i, dtype=float)
+                yf = np.asarray(yf_i, dtype=float)
             frames.append(omega)
             xc = xc_i
             yc = yc_i
@@ -484,28 +547,20 @@ def plot_vorticity_video(
             f"{preview}{suffix}"
         )
 
-    if xc is None or yc is None or not frames:
+    if xc is None or yc is None or xf is None or yf is None or not frames:
         raise RuntimeError("Failed to assemble vorticity frames.")
 
     # Tighten the displayed range so the vorticity colors read darker/more saturated.
     max_abs_omega = max(0.5 * max_abs_omega, 1e-12)
     fig, ax = plt.subplots(figsize=(8.5, 4.5))
-    dx = float(xc[1] - xc[0]) if len(xc) > 1 else 1.0
-    dy = float(yc[1] - yc[0]) if len(yc) > 1 else 1.0
-    extent = (
-        float(xc[0] - 0.5 * dx),
-        float(xc[-1] + 0.5 * dx),
-        float(yc[0] - 0.5 * dy),
-        float(yc[-1] + 0.5 * dy),
-    )
-    image = ax.imshow(
+    image = ax.pcolormesh(
+        xf,
+        yf,
         frames[0].T,
-        origin="lower",
-        extent=extent,
+        shading="flat",
         cmap="seismic",
         vmin=-max_abs_omega,
         vmax=max_abs_omega,
-        aspect="auto",
     )
     cbar = fig.colorbar(image, ax=ax)
     cbar.set_label(r"$\omega_z$")
@@ -513,7 +568,12 @@ def plot_vorticity_video(
     ax.set_xlabel("x")
     ax.set_ylabel("y")
     ax.set_aspect("equal")
-    circle_geometry = _load_cylinder_overlay_geometry(config_path=config_path)
+    ax.set_xlim(-5.0, 15.0)
+    ax.set_ylim(-5.0, 5.0)
+    circle_geometry = _load_cylinder_overlay_geometry_for_snapshot(
+        paths[0],
+        config_path=config_path,
+    )
     if circle_geometry is not None:
         cx, cy, radius = circle_geometry
         ax.add_patch(
@@ -528,7 +588,7 @@ def plot_vorticity_video(
         )
 
     def _update(frame_idx: int):
-        image.set_data(frames[frame_idx].T)
+        image.set_array(frames[frame_idx].T.ravel())
         title.set_text(f"Vorticity t={times[frame_idx]:.4f}")
         return [image, title]
 
@@ -596,6 +656,8 @@ def _load_grid_faces_for_snapshot(
 def plot_ibm_forcing(
     file_path: str,
     save_name: Optional[str] = None,
+    x_scale: float = 1.0,
+    y_scale: float = 1.0,
 ) -> None:
     """Plot IBM forcing x/y components and magnitude from a snapshot."""
     if not os.path.exists(file_path):
@@ -628,7 +690,9 @@ def plot_ibm_forcing(
         xlim = (float(xf[0]), float(xf[-1]))
         ylim = (float(yf[0]), float(yf[-1]))
 
-    fig, axes = plt.subplots(1, 3, figsize=(14, 4.5))
+    figsize = _scaled_figsize(14.0, 4.5, x_scale=x_scale, y_scale=y_scale)
+    aspect = _axis_aspect(x_scale=x_scale, y_scale=y_scale)
+    fig, axes = plt.subplots(1, 3, figsize=figsize)
 
     im0 = axes[0].pcolormesh(Xf, Yf, fx, shading="flat", cmap="seismic",
                              vmin=-vmax_comp, vmax=vmax_comp)
@@ -654,7 +718,7 @@ def plot_ibm_forcing(
     for ax in axes:
         ax.set_xlim(*xlim)
         ax.set_ylim(*ylim)
-        ax.set_aspect("equal")
+        ax.set_aspect(aspect)
 
     fig.suptitle(
         f"IBM Forcing Fields: {os.path.basename(file_path)}", fontsize=12, fontweight="bold")
@@ -705,6 +769,10 @@ def main(argv=None):
                         help="frames per second for the animated vorticity GIF")
     parser.add_argument("--video-frame-stride", type=int, default=1,
                         help="use every nth snapshot when building the vorticity GIF")
+    parser.add_argument("--x-scale", type=float, default=1.0,
+                        help="horizontal display scale for saved field plots")
+    parser.add_argument("--y-scale", type=float, default=1.0,
+                        help="vertical display scale for saved field plots")
     parser.add_argument("--verbose", action="store_true",
                         help="print progress while building derived outputs")
     args = parser.parse_args(argv)
@@ -740,7 +808,12 @@ def main(argv=None):
 
         save_name = args.save or "ibm_forcing.png"
         try:
-            plot_ibm_forcing(args.file, save_name=save_name)
+            plot_ibm_forcing(
+                args.file,
+                save_name=save_name,
+                x_scale=args.x_scale,
+                y_scale=args.y_scale,
+            )
         except Exception as e:
             print(f"Error plotting IBM forcing: {e}", file=sys.stderr)
             sys.exit(9)
@@ -791,6 +864,8 @@ def main(argv=None):
             save_name=args.save,
             slice_idx=args.slice,
             comp_idx=args.comp,
+            x_scale=args.x_scale,
+            y_scale=args.y_scale,
         )
     except Exception as e:
         print(f"Error plotting snapshot key: {e}", file=sys.stderr)

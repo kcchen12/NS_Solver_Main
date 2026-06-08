@@ -5,9 +5,12 @@ import numpy as np
 
 from analyze_aerodynamics import _read_config, plot_shedding_spectrum, save_pressure_coefficient_report
 from time_average_snapshots import compute_time_averaged_fields, save_time_averaged_fields
+from time_average_snapshots import plot_time_averaged_fields
 from view_snapshot_viewer import (
+    _load_cylinder_overlay_geometry_for_snapshot,
     _compute_snapshot_vorticity,
     pick_slice_and_component,
+    plot_snapshot_key,
     plot_vorticity_video,
 )
 
@@ -137,6 +140,15 @@ class TestAnalyzeAerodynamicsHelpers:
         )
         assert os.path.exists(save_path)
 
+        plot_path = plot_time_averaged_fields(
+            save_path,
+            save_name="test_time_avg.png",
+            results_dir=str(results_dir),
+            x_scale=1.5,
+            y_scale=0.75,
+        )
+        assert os.path.exists(plot_path)
+
 
 class TestSnapshotViewerHelpers:
     def test_pick_slice_and_component_for_component_last(self):
@@ -163,6 +175,64 @@ class TestSnapshotViewerHelpers:
         assert yc.shape == (ny,)
         assert omega.shape == (nx, ny)
         assert np.allclose(omega, 0.0)
+
+    def test_plot_snapshot_key_accepts_independent_axis_scales(self, tmp_path):
+        outdir = tmp_path / "output"
+        outdir.mkdir()
+        results_dir = tmp_path / "results"
+        results_dir.mkdir()
+
+        snap_path = outdir / "snap_000.0000.npz"
+        np.savez(snap_path, p=np.arange(12, dtype=float).reshape(3, 4), t=0.0)
+
+        old_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            plot_snapshot_key(
+                str(snap_path),
+                "p",
+                save_name="scaled_pressure.png",
+                x_scale=1.8,
+                y_scale=0.6,
+            )
+            assert (results_dir / "scaled_pressure.png").exists()
+        finally:
+            os.chdir(old_cwd)
+
+    def test_cylinder_overlay_prefers_snapshot_metadata(self, tmp_path):
+        outdir = tmp_path / "output"
+        outdir.mkdir()
+        config_path = tmp_path / "config.txt"
+        config_path.write_text(
+            "cylinder = true\n"
+            "lx = 10.0\n"
+            "ly = 10.0\n"
+            "cylinder_center_x = 9.0\n"
+            "cylinder_center_y = 9.0\n"
+            "cylinder_radius = 1.0\n",
+            encoding="utf-8",
+        )
+
+        nx, ny = 4, 3
+        u = np.ones((nx + 1, ny), dtype=float)
+        v = np.zeros((nx, ny + 1), dtype=float)
+        snap_path = outdir / "snap_000.0000.npz"
+        np.savez(
+            snap_path,
+            u=u,
+            v=v,
+            t=0.0,
+            meta_cylinder_enabled=np.array(True),
+            meta_cylinder_center_x=np.array(0.0),
+            meta_cylinder_center_y=np.array(0.0),
+            meta_cylinder_radius=np.array(0.5),
+        )
+
+        geom = _load_cylinder_overlay_geometry_for_snapshot(
+            str(snap_path),
+            config_path=str(config_path),
+        )
+        assert geom == (0.0, 0.0, 0.5)
 
     def test_plot_vorticity_video_writes_gif(self, tmp_path):
         outdir = tmp_path / "output"
