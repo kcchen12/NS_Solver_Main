@@ -1,0 +1,37 @@
+# NS_Solver Experimental Cylinder Configuration
+# This file is loaded by main.py in addition to config.txt and post_config.txt.
+
+# Cylinder experiment controls
+# cylinder_experiment options:
+#   none
+#   top-indent
+#   simulated-sweeping-jet
+#   geometry-resolved-sweeping-jet
+cylinder_experiment = none
+
+# Experimental geometry controls
+cylinder_indent_width = 0.0
+cylinder_indent_depth = 0.0
+
+# Shared sweeping-jet actuation controls
+sweeping_jet_velocity_ratio = 10.0
+sweeping_jet_frequency = 0.2
+sweeping_jet_center_deg = 0.0
+sweeping_jet_angle_deg = 45.0
+sweeping_jet_phase_deg = 0.0
+
+# Experimental geometry-resolved sweeping-jet controls
+# All lengths below are physical lengths in the cylinder-local frame.
+resolved_jet_cavity_width = 3.6
+resolved_jet_cavity_height = 3.0
+resolved_jet_slot_width = 0.96
+resolved_jet_slot_height = 0.72
+resolved_jet_feed_width = 1.8
+resolved_jet_feed_height = 0.88
+resolved_jet_nozzle_length = 0.9
+resolved_jet_slot_exit_width = 2.4
+resolved_jet_island_wall_gap = 0.45
+resolved_jet_island_center_gap = 1.45
+resolved_jet_island_leading_gap = 0.38
+resolved_jet_island_trailing_gap = 0.38
+resolved_jet_island_taper = 0.22

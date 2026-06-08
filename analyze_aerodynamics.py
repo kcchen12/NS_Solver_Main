@@ -20,8 +20,8 @@ import re
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
 
+import matplotlib.pyplot as plt
 import numpy as np
-from scipy.signal import lombscargle
 
 from src.config import ConfigParser
 
@@ -55,6 +55,7 @@ class CylinderGeometry:
 
 @dataclass(frozen=True)
 class SurfaceForcePlan:
+    theta: np.ndarray
     normals_x: np.ndarray
     normals_y: np.ndarray
     arc_length: float
@@ -155,6 +156,14 @@ def _build_uniform_face_and_center_coords(
 
 def _load_snapshot_fields(path: str, *field_names: str) -> tuple[np.ndarray, ...]:
     with np.load(path, allow_pickle=False) as data:
+        missing = [name for name in field_names if name not in data.files]
+        if missing:
+            available = ", ".join(sorted(data.files))
+            missing_str = ", ".join(missing)
+            raise KeyError(
+                f"Snapshot {os.path.basename(path)!r} is missing field(s): "
+                f"{missing_str}. Available fields: {available}"
+            )
         return tuple(np.array(data[name], copy=True) for name in field_names)
 
 
@@ -230,6 +239,21 @@ def _estimate_cylinder_geometry(
         center_x=center_x,
         center_y=center_y,
         radius=r,
+    )
+
+
+def _snapshot_cylinder_geometry(
+    data: np.lib.npyio.NpzFile,
+    fallback: CylinderGeometry,
+) -> CylinderGeometry:
+    """Return per-snapshot cylinder geometry when moving-body metadata exists."""
+    center_x = _safe_scalar(data, "meta_cylinder_center_x")
+    center_y = _safe_scalar(data, "meta_cylinder_center_y")
+    radius = _safe_scalar(data, "meta_cylinder_radius")
+    return CylinderGeometry(
+        center_x=fallback.center_x if center_x is None else float(center_x),
+        center_y=fallback.center_y if center_y is None else float(center_y),
+        radius=fallback.radius if radius is None else float(radius),
     )
 
 
@@ -322,9 +346,31 @@ def _dominant_frequency(
     t_min: float,
     f_min: float,
     f_max: float,
-    n_freq: int,
 ) -> Optional[Tuple[float, float]]:
-    """Return (f_peak, peak_power) from Lomb-Scargle spectrum."""
+    """Return (f_peak, peak_power) from a one-sided Fourier power spectrum."""
+    out = _compute_fourier_power_spectrum(
+        t,
+        signal,
+        t_min=t_min,
+        f_min=f_min,
+        f_max=f_max,
+    )
+    if out is None:
+        return None
+
+    _, _, freq_band, power_band = out
+    idx = int(np.argmax(power_band))
+    return float(freq_band[idx]), float(power_band[idx])
+
+
+def _compute_fourier_power_spectrum(
+    t: np.ndarray,
+    signal: np.ndarray,
+    t_min: float,
+    f_min: float,
+    f_max: float,
+) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+    """Return (t_uniform, signal_uniform, freq_band, power_band) for a one-sided FFT."""
     mask = t >= t_min
     ts = t[mask]
     ys = signal[mask]
@@ -337,12 +383,67 @@ def _dominant_frequency(
     if sigma < 1e-12:
         return None
 
-    freq = np.linspace(f_min, f_max, n_freq)
-    omega = 2.0 * np.pi * freq
-    power = lombscargle(ts, ys, omega, precenter=False, normalize=True)
-    idx = int(np.argmax(power))
+    dt = np.diff(ts)
+    dt_ref = float(np.median(dt)) if dt.size else np.nan
+    if not np.isfinite(dt_ref) or dt_ref <= 0.0:
+        return None
 
-    return float(freq[idx]), float(power[idx])
+    if not np.allclose(dt, dt_ref, rtol=1e-4, atol=1e-10):
+        # Snapshot times can drift under adaptive stepping even when the saved
+        # history is otherwise smooth. Resample onto a uniform grid before FFT.
+        n_uniform = int(np.floor((ts[-1] - ts[0]) / dt_ref)) + 1
+        if n_uniform < 8:
+            return None
+        ts_uniform = ts[0] + dt_ref * np.arange(n_uniform, dtype=float)
+        ys = np.interp(ts_uniform, ts, ys)
+        ts = ts_uniform
+
+    freq = np.fft.rfftfreq(ts.size, d=dt_ref)
+    spectrum = np.fft.rfft(ys)
+    power = (np.abs(spectrum) ** 2) / float(ts.size**2)
+
+    band = (freq >= f_min) & (freq <= f_max)
+    if not np.any(band):
+        return None
+
+    freq_band = freq[band]
+    power_band = power[band]
+    return ts, ys, freq_band, power_band
+
+
+def _find_top_spectral_peaks(
+    freq: np.ndarray,
+    power: np.ndarray,
+    max_peaks: int = 3,
+    min_relative_power: float = 0.10,
+) -> list[int]:
+    """Return indices of the strongest local spectral peaks."""
+    if freq.size == 0 or power.size == 0:
+        return []
+
+    if power.size == 1:
+        return [0]
+
+    peak_indices: list[int] = []
+    threshold = float(np.max(power)) * float(min_relative_power)
+
+    for idx in range(power.size):
+        left = power[idx - 1] if idx > 0 else -np.inf
+        right = power[idx + 1] if idx + 1 < power.size else -np.inf
+        if power[idx] >= threshold and power[idx] >= left and power[idx] >= right:
+            peak_indices.append(idx)
+
+    if not peak_indices:
+        peak_indices = [int(np.argmax(power))]
+
+    peak_indices.sort(key=lambda idx: power[idx], reverse=True)
+    unique: list[int] = []
+    for idx in peak_indices:
+        if idx not in unique:
+            unique.append(idx)
+        if len(unique) >= max_peaks:
+            break
+    return unique
 
 
 def _is_edge_frequency(f: float, f_min: float, f_max: float) -> bool:
@@ -367,10 +468,22 @@ def _build_surface_force_plan(
         for x, y in zip(x_surf, y_surf)
     )
     return SurfaceForcePlan(
+        theta=theta,
         normals_x=np.cos(theta),
         normals_y=np.sin(theta),
         arc_length=2.0 * np.pi * geom.radius / float(n_samples),
         bilinear_plans=plans,
+    )
+
+
+def _sample_surface_pressure(
+    p: np.ndarray,
+    force_plan: SurfaceForcePlan,
+) -> np.ndarray:
+    """Sample pressure along the cylinder surface interpolation plan."""
+    return np.array(
+        [_apply_bilinear_plan(p, plan) for plan in force_plan.bilinear_plans],
+        dtype=float,
     )
 
 
@@ -379,10 +492,7 @@ def _compute_pressure_forces(
     force_plan: SurfaceForcePlan,
 ) -> Tuple[float, float]:
     """Compute pressure forces on the cylinder via a contour integral."""
-    pressure_samples = np.array(
-        [_apply_bilinear_plan(p, plan) for plan in force_plan.bilinear_plans],
-        dtype=float,
-    )
+    pressure_samples = _sample_surface_pressure(p, force_plan)
     pressure_samples -= np.mean(pressure_samples)
 
     # Force on the body is - integral(p * n ds) over the body surface.
@@ -397,16 +507,250 @@ def _compute_pressure_forces(
 
 def _compute_forces(
     snapshot_path: str,
-    force_plan: SurfaceForcePlan,
+    xc: np.ndarray,
+    yc: np.ndarray,
+    geom: CylinderGeometry,
+    force_source: str = "ibm",
 ) -> Tuple[float, float]:
     """Compute x and y forces from a single snapshot."""
     with np.load(snapshot_path, allow_pickle=False) as data:
         fx_meta = _safe_scalar(data, "meta_ibm_force_x")
         fy_meta = _safe_scalar(data, "meta_ibm_force_y")
-        if fx_meta is not None and fy_meta is not None:
+        if force_source == "ibm" and fx_meta is not None and fy_meta is not None:
             return float(fx_meta), float(fy_meta)
+        if "p" not in data.files:
+            available = ", ".join(sorted(data.files))
+            raise KeyError(
+                f"Snapshot {os.path.basename(snapshot_path)!r} is missing field "
+                f"'p'. Available fields: {available}"
+            )
         p = data["p"]
+        snapshot_geom = _snapshot_cylinder_geometry(data, geom)
+
+    force_plan = _build_surface_force_plan(xc, yc, snapshot_geom)
     return _compute_pressure_forces(p, force_plan)
+
+
+def _load_grid_faces_for_snapshot(
+    snapshot_path: str,
+    nx: int,
+    ny: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Load physical grid faces from prepared-grid metadata when available."""
+    indir = os.path.dirname(os.path.abspath(snapshot_path))
+    candidates = [
+        os.path.join(indir, "nonuniform_grid.npz"),
+        os.path.join(indir, "uniform_grid.npz"),
+    ]
+
+    for grid_path in candidates:
+        if not os.path.exists(grid_path):
+            continue
+        try:
+            with np.load(grid_path, allow_pickle=False) as meta:
+                if "xf" in meta and "yf" in meta:
+                    xf = np.asarray(meta["xf"], dtype=float)
+                    yf = np.asarray(meta["yf"], dtype=float)
+                    if xf.shape == (nx + 1,) and yf.shape == (ny + 1,):
+                        return xf, yf
+        except Exception:
+            continue
+
+    with np.load(snapshot_path, allow_pickle=False) as data:
+        lx = _safe_scalar(data, "meta_lx")
+        ly = _safe_scalar(data, "meta_ly")
+        x_min = _safe_scalar(data, "meta_x_min")
+        y_min = _safe_scalar(data, "meta_y_min")
+
+    if lx is not None and ly is not None:
+        x0 = 0.0 if x_min is None else float(x_min)
+        y0 = 0.0 if y_min is None else float(y_min)
+        xf = np.linspace(x0, x0 + float(lx), nx + 1)
+        yf = np.linspace(y0, y0 + float(ly), ny + 1)
+        return xf, yf
+
+    return np.arange(nx + 1, dtype=float), np.arange(ny + 1, dtype=float)
+
+
+def plot_shedding_spectrum(
+    csv_path: str,
+    save_name: str = "shedding_spectrum.png",
+    t_min: float = 1.0,
+    f_min: float = 0.05,
+    f_max: float = 2.0,
+    char_length: Optional[float] = None,
+    u_ref: Optional[float] = None,
+) -> None:
+    """Plot the Fourier energy spectrum of C_l and mark dominant shedding peaks."""
+    plt.switch_backend("Agg")
+    arr = np.genfromtxt(csv_path, delimiter=",", names=True)
+    if arr.size == 0:
+        raise ValueError(f"No rows found in coefficient file: {csv_path}")
+
+    names = arr.dtype.names or ()
+    if "t" not in names or "c_l" not in names:
+        raise ValueError(
+            f"CSV missing required columns ['t', 'c_l']. Found: {list(names)}"
+        )
+
+    t = np.atleast_1d(arr["t"]).astype(float)
+    c_l = np.atleast_1d(arr["c_l"]).astype(float)
+    out = _compute_fourier_power_spectrum(
+        t,
+        c_l,
+        t_min=t_min,
+        f_min=f_min,
+        f_max=f_max,
+    )
+    if out is None:
+        raise ValueError("Insufficient oscillatory data to compute a Fourier spectrum.")
+
+    _, _, freq_band, power_band = out
+    peak_indices = _find_top_spectral_peaks(freq_band, power_band, max_peaks=3)
+    fig, ax = plt.subplots(figsize=(9, 5.5))
+    ax.loglog(freq_band, power_band, color="tab:blue", linewidth=1.8)
+    ax.set_xlabel("Frequency")
+    ax.set_ylabel("Fourier energy")
+    ax.set_title(
+        f"Lift Spectrum / Shedding Frequencies ({os.path.basename(csv_path)})",
+        fontsize=12,
+        fontweight="bold",
+    )
+    ax.grid(True, alpha=0.3)
+
+    ymax = float(np.max(power_band)) if power_band.size else 1.0
+    for rank, idx in enumerate(peak_indices, start=1):
+        f_peak = float(freq_band[idx])
+        p_peak = float(power_band[idx])
+        ax.scatter([f_peak], [p_peak], color="crimson", zorder=3)
+        label = f"#{rank}: f={f_peak:.4g}"
+        if char_length is not None and u_ref is not None and u_ref > 0.0:
+            st = f_peak * float(char_length) / float(u_ref)
+            label += f", St={st:.4g}"
+        ax.annotate(
+            label,
+            xy=(f_peak, p_peak),
+            xytext=(8, 8 + 16 * (rank - 1)),
+            textcoords="offset points",
+            fontsize=9,
+            color="crimson",
+            arrowprops={"arrowstyle": "-", "color": "crimson", "lw": 0.8},
+        )
+
+    ax.set_xlim(float(freq_band[0]), float(freq_band[-1]))
+    ax.set_ylim(
+        bottom=max(float(np.min(power_band)), np.finfo(float).eps),
+        top=max(1.05 * ymax, np.finfo(float).eps),
+    )
+    fig.tight_layout()
+
+    os.makedirs(DEFAULT_RESULTS_DIR, exist_ok=True)
+    save_path = os.path.join(DEFAULT_RESULTS_DIR, save_name)
+    fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved figure: {save_path}")
+
+
+def save_pressure_coefficient_report(
+    snapshot_path: str,
+    u_ref: float,
+    save_csv: str = "pressure_coefficient_theta.csv",
+    save_plot: str = "pressure_coefficient_theta.png",
+    config_path: Optional[str] = None,
+    cylinder_center: Optional[Tuple[float, float]] = None,
+    cylinder_radius: Optional[float] = None,
+    n_samples: int = 720,
+) -> None:
+    """Save C_p(theta) from one snapshot as CSV and PNG."""
+    plt.switch_backend("Agg")
+    with np.load(snapshot_path, allow_pickle=False) as data:
+        if "p" not in data.files:
+            available = ", ".join(sorted(data.files))
+            raise KeyError(
+                f"Snapshot {os.path.basename(snapshot_path)!r} is missing field "
+                f"'p'. Available fields: {available}"
+            )
+        p = np.asarray(data["p"], dtype=float)
+
+    nx, ny = p.shape
+    xf, yf = _load_grid_faces_for_snapshot(snapshot_path, nx=nx, ny=ny)
+    xc = 0.5 * (xf[:-1] + xf[1:])
+    yc = 0.5 * (yf[:-1] + yf[1:])
+
+    if cylinder_center is None or cylinder_radius is None:
+        geom = _estimate_cylinder_geometry(
+            snapshot_path,
+            config_path=config_path,
+            cylinder_radius=cylinder_radius,
+        )
+    else:
+        geom = CylinderGeometry(
+            center_x=float(cylinder_center[0]),
+            center_y=float(cylinder_center[1]),
+            radius=float(cylinder_radius),
+        )
+
+    if u_ref <= 0.0:
+        raise ValueError("Reference velocity must be positive for pressure coefficient.")
+
+    force_plan = _build_surface_force_plan(xc, yc, geom, n_samples=n_samples)
+    pressure_samples = _sample_surface_pressure(p, force_plan)
+    pressure_ref = float(np.mean(pressure_samples))
+    c_p = (pressure_samples - pressure_ref) / (0.5 * float(u_ref) ** 2)
+    theta_rad = force_plan.theta
+    theta_deg = np.rad2deg(theta_rad)
+
+    os.makedirs(DEFAULT_RESULTS_DIR, exist_ok=True)
+    csv_path = os.path.join(DEFAULT_RESULTS_DIR, save_csv)
+    plot_path = os.path.join(DEFAULT_RESULTS_DIR, save_plot)
+
+    out = np.column_stack((theta_deg, theta_rad, pressure_samples, c_p))
+    header = "theta_deg,theta_rad,pressure_surface,c_p_zero_mean_surface"
+    np.savetxt(csv_path, out, delimiter=",", header=header, comments="")
+
+    fig, ax = plt.subplots(figsize=(9, 5.5))
+    ax.plot(theta_deg, c_p, color="tab:purple", linewidth=1.8)
+    ax.set_xlabel("Theta [deg]")
+    ax.set_ylabel(r"$C_p$")
+    ax.set_title(
+        f"Surface Pressure Coefficient vs Theta ({os.path.basename(snapshot_path)})",
+        fontsize=12,
+        fontweight="bold",
+    )
+    ax.grid(True, alpha=0.3)
+    ax.set_xlim(0.0, 360.0)
+    fig.tight_layout()
+    fig.savefig(plot_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    print(f"Saved pressure-coefficient CSV: {csv_path}")
+    print(f"Saved figure: {plot_path}")
+
+
+def _filter_valid_snapshots(
+    snapshots: List[Tuple[float, str]],
+) -> Tuple[List[Tuple[float, str]], List[str]]:
+    """Keep only snapshots that include the fields aerodynamic analysis needs."""
+    valid: List[Tuple[float, str]] = []
+    skipped: List[str] = []
+
+    for t, path in snapshots:
+        try:
+            with np.load(path, allow_pickle=False) as data:
+                has_velocity = "u" in data.files and "v" in data.files
+                has_force_meta = (
+                    "meta_ibm_force_x" in data.files and
+                    "meta_ibm_force_y" in data.files
+                )
+                has_pressure = "p" in data.files
+                if has_velocity and (has_force_meta or has_pressure):
+                    valid.append((t, path))
+                else:
+                    skipped.append(os.path.basename(path))
+        except Exception:
+            skipped.append(os.path.basename(path))
+
+    return valid, skipped
 
 
 def _compute_coefficients(
@@ -439,6 +783,7 @@ def _extract_combined_series(
     geom: CylinderGeometry,
     u_ref: float,
     char_length: float,
+    force_source: str = "ibm",
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Extract optional probe series and force/coefficient histories.
 
@@ -448,8 +793,9 @@ def _extract_combined_series(
     t, u_probe, v_probe, p_probe = _extract_probe_series(
         snapshots, nx, ny, lx, ly, probe_x, probe_y
     )
-    _, xc, _, yc = _build_uniform_face_and_center_coords(nx, ny, lx, ly)
-    force_plan = _build_surface_force_plan(xc, yc, geom)
+    xf, yf = _load_grid_faces_for_snapshot(snapshots[0][1], nx=nx, ny=ny)
+    xc = 0.5 * (xf[:-1] + xf[1:])
+    yc = 0.5 * (yf[:-1] + yf[1:])
 
     n = len(snapshots)
     f_x_arr = np.empty(n, dtype=float)
@@ -458,7 +804,13 @@ def _extract_combined_series(
     c_l_arr = np.empty(n, dtype=float)
 
     for k, (_, path) in enumerate(snapshots):
-        f_x, f_y = _compute_forces(path, force_plan)
+        f_x, f_y = _compute_forces(
+            path,
+            xc=xc,
+            yc=yc,
+            geom=geom,
+            force_source=force_source,
+        )
         c_d, c_l = _compute_coefficients(f_x, f_y, u_ref, char_length)
         f_x_arr[k] = f_x
         f_y_arr[k] = f_y
@@ -492,6 +844,12 @@ def parse_args() -> argparse.Namespace:
                         help="Use L = 2*cylinder_radius from config (or ly/4 if radius is default)")
     parser.add_argument("--cylinder-radius", type=float, default=None,
                         help="Cylinder radius (default: read from config or ly/8)")
+    parser.add_argument("--force-source", choices=("ibm", "pressure"), default="ibm",
+                        help=(
+                            "Force source: ibm uses saved direct-forcing metadata "
+                            "(default); pressure integrates pressure around the "
+                            "per-snapshot cylinder surface"
+                        ))
 
     parser.add_argument("--t-min", type=float, default=1.0,
                         help="Ignore data before this time for frequency fit (default: 1.0)")
@@ -499,8 +857,6 @@ def parse_args() -> argparse.Namespace:
                         help="Min search frequency (default: 0.05)")
     parser.add_argument("--f-max", type=float, default=2.0,
                         help="Max search frequency (default: 2.0)")
-    parser.add_argument("--n-freq", type=int, default=4000,
-                        help="Number of frequency samples (default: 4000)")
 
     parser.add_argument("--save-series", type=str, default=None,
                         help="Optional CSV path for combined time series")
@@ -525,14 +881,26 @@ def run_analysis(
     t_min: float = 1.0,
     f_min: float = 0.05,
     f_max: float = 2.0,
-    n_freq: int = 4000,
     save_series: Optional[str] = None,
     save_report: Optional[str] = os.path.join(DEFAULT_RESULTS_DIR, "aero_report.txt"),
+    force_source: str = "ibm",
 ) -> int:
     """Run aerodynamic post-processing programmatically."""
     snapshots = _collect_snapshots(indir, pattern)
     if not snapshots:
         print(f"No snapshots found in {indir!r} with pattern {pattern!r}.")
+        return 1
+
+    snapshots, skipped = _filter_valid_snapshots(snapshots)
+    if skipped:
+        preview = ", ".join(skipped[:5])
+        suffix = "" if len(skipped) <= 5 else ", ..."
+        print(
+            f"Skipped {len(skipped)} snapshot(s) missing required fields: "
+            f"{preview}{suffix}"
+        )
+    if not snapshots:
+        print("No valid snapshots remain after filtering incomplete files.")
         return 1
 
     l_char, u_ref, nx, ny, lx, ly = _estimate_scales(
@@ -560,6 +928,7 @@ def run_analysis(
         geom=geom,
         u_ref=u_ref,
         char_length=l_char,
+        force_source=force_source,
     )
 
     if save_series:
@@ -579,7 +948,6 @@ def run_analysis(
         t_min=t_min,
         f_min=f_min,
         f_max=f_max,
-        n_freq=n_freq,
     )
     if out is not None:
         f_peak, peak_power = out
@@ -604,6 +972,7 @@ def run_analysis(
         print(f"Probe location    : ({probe_x:.6g}, {probe_y:.6g})")
     print(f"Cylinder center   : ({geom.center_x:.6g}, {geom.center_y:.6g})")
     print(f"Cylinder radius   : {geom.radius:.6g}")
+    print(f"Force source      : {force_source}")
     print(f"Char. length (L)  : {l_char:.6g}")
     print(f"Ref. velocity (U) : {u_ref:.6g}")
     print()
@@ -655,6 +1024,7 @@ def run_analysis(
             f"Time span         : [{t.min():.4f}, {t.max():.4f}]",
             f"Cylinder center   : ({geom.center_x:.6g}, {geom.center_y:.6g})",
             f"Cylinder radius   : {geom.radius:.6g}",
+            f"Force source      : {force_source}",
             f"Char. length (L)  : {l_char:.6g}",
             f"Ref. velocity (U) : {u_ref:.6g}",
             "",
@@ -724,9 +1094,9 @@ def main() -> int:
         t_min=args.t_min,
         f_min=args.f_min,
         f_max=args.f_max,
-        n_freq=args.n_freq,
         save_series=args.save_series,
         save_report=args.save_report,
+        force_source=args.force_source,
     )
 
 

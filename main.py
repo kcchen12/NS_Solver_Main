@@ -13,7 +13,7 @@ Simulates **uniform flow in a 2-D box** using:
 
 Usage
 -----
-Serial run (reads from config.txt)::
+Serial run (reads from config.txt, experimental_config.txt, and post_config.txt)::
 
     python main.py
 
@@ -34,7 +34,8 @@ Command-line arguments override config file values::
     --save_dt   Interval between snapshots       [default: from config]
     --outdir    Output directory                 [default: from config]
     --cylinder  Add an immersed-boundary cylinder [flag]
-    --plot      Show matplotlib plots at the end  [flag]
+    --experiment-config  Path to experimental cylinder config [default: experimental_config.txt]
+    --plot      Save matplotlib plots at the end  [default: from post config]
 """
 
 import argparse
@@ -54,7 +55,12 @@ from src.io_utils import (
 )
 from src.parallel import ParallelDecomposition
 from src.config import ConfigParser
-from analyze_aerodynamics import run_analysis as run_aero_analysis
+from analyze_aerodynamics import (
+    run_analysis as run_aero_analysis,
+    plot_shedding_spectrum,
+    save_pressure_coefficient_report,
+)
+from time_average_snapshots import plot_time_averaged_fields, save_time_averaged_fields
 from view_snapshot_viewer import find_latest_snapshot, plot_coeff_history
 from view_snapshot_viewer import plot_ibm_forcing, plot_vorticity_video
 
@@ -75,12 +81,6 @@ def _normalize_bc_type(raw_value: str, default: str) -> str:
     return value if value in valid else default
 
 
-def _normalize_nonuniform_mode(raw_value: str | None) -> str:
-    value = "center-band" if raw_value is None else str(
-        raw_value).strip().lower()
-    return value if value in {"center-band", "center-uniform"} else "center-band"
-
-
 def _normalize_farfield_mode(raw_value: str | None) -> str:
     value = FarfieldMode.DIRICHLET if raw_value is None else str(raw_value).strip().lower()
     return value if value in {FarfieldMode.DIRICHLET, FarfieldMode.NEUMANN} else FarfieldMode.DIRICHLET
@@ -95,6 +95,83 @@ def _normalize_cylinder_rotation_mode(raw_value: str | None) -> str:
     }
     value = aliases.get(value, value)
     return value if value in {"stationary", "oscillatory", "constant"} else "stationary"
+
+
+def _normalize_cylinder_translation_mode(raw_value: str | None) -> str:
+    value = "stationary" if raw_value is None else str(raw_value).strip().lower()
+    aliases = {
+        "none": "stationary",
+        "off": "stationary",
+        "fixed": "stationary",
+        "left-right": "oscillatory-x",
+        "left_right": "oscillatory-x",
+        "horizontal": "oscillatory-x",
+        "up-down": "oscillatory-y",
+        "up_down": "oscillatory-y",
+        "vertical": "oscillatory-y",
+        "xy": "oscillatory-xy",
+        "both": "oscillatory-xy",
+        "oscillatory": "oscillatory-xy",
+    }
+    value = aliases.get(value, value)
+    valid = {"stationary", "oscillatory-x", "oscillatory-y", "oscillatory-xy"}
+    return value if value in valid else "stationary"
+
+
+def _normalize_ibm_shape(raw_value: str | None) -> str:
+    value = "circle" if raw_value is None else str(raw_value).strip().lower()
+    aliases = {
+        "cylinder": "circle",
+        "circle_top_indent": "circle-with-top-indent",
+        "circle-with-indent": "circle-with-top-indent",
+        "indented-circle": "circle-with-top-indent",
+    }
+    value = aliases.get(value, value)
+    return value if value in {"circle", "circle-with-top-indent"} else "circle"
+
+
+def _normalize_cylinder_geometry_mode(raw_value: str | None) -> str:
+    value = "circle" if raw_value is None else str(raw_value).strip().lower()
+    aliases = {
+        "ibm-circle": "circle",
+        "indented-circle": "circle-with-top-indent",
+        "rectangular-top-indent": "circle-with-top-indent",
+    }
+    return _normalize_ibm_shape(aliases.get(value, value))
+
+
+def _normalize_cylinder_actuation_mode(raw_value: str | None) -> str:
+    value = "none" if raw_value is None else str(raw_value).strip().lower()
+    aliases = {
+        "off": "none",
+        "sweeping_jet": "sweeping-jet",
+        "jet": "sweeping-jet",
+        "geometry_resolved_sweeping_jet": "geometry-resolved-sweeping-jet",
+        "resolved-jet": "geometry-resolved-sweeping-jet",
+    }
+    value = aliases.get(value, value)
+    return value if value in {"none", "sweeping-jet", "geometry-resolved-sweeping-jet"} else "none"
+
+
+def _normalize_cylinder_experiment_mode(raw_value: str | None) -> str:
+    value = "none" if raw_value is None else str(raw_value).strip().lower()
+    aliases = {
+        "off": "none",
+        "indent": "top-indent",
+        "rectangular-indent": "top-indent",
+        "simulated-jet": "simulated-sweeping-jet",
+        "simulated_sweeping_jet": "simulated-sweeping-jet",
+        "geometry-resolved-jet": "geometry-resolved-sweeping-jet",
+        "geometry_resolved_sweeping_jet": "geometry-resolved-sweeping-jet",
+    }
+    value = aliases.get(value, value)
+    valid = {
+        "none",
+        "top-indent",
+        "simulated-sweeping-jet",
+        "geometry-resolved-sweeping-jet",
+    }
+    return value if value in valid else "none"
 
 
 def parse_args():
@@ -123,6 +200,9 @@ def parse_args():
     p_pre = argparse.ArgumentParser(add_help=False)
     p_pre.add_argument("--config", type=str, default=default_config,
                        help="Path to configuration file")
+    p_pre.add_argument("--experiment-config", type=str,
+                       default=os.path.join(SCRIPT_DIR, "experimental_config.txt"),
+                       help="Path to experimental cylinder configuration file")
     p_pre.add_argument("--post-config", type=str,
                        default=os.path.join(SCRIPT_DIR, "post_config.txt"),
                        help="Path to post-processing configuration file")
@@ -130,42 +210,18 @@ def parse_args():
 
     # Read config files
     cfg = ConfigParser(args_pre.config)
+    exp_cfg = ConfigParser(args_pre.experiment_config)
     post_cfg = ConfigParser(args_pre.post_config)
 
     # Unified grid controls from config.txt.
-    # Backward compatibility:
-    # 1) If uniform_grid is set, it overrides string grid type keys.
-    # 2) Otherwise grid_type can override legacy runtime_grid_type.
-    # 3) grid_beta_x/y can override legacy runtime/pre betas.
     uniform_grid = cfg.get("uniform_grid", None, bool)
     if uniform_grid is None:
-        grid_type_default = cfg.get(
-            "grid_type", cfg.get("runtime_grid_type", "uniform", str), str
-        )
+        grid_type_default = cfg.get("grid_type", "uniform", str)
     else:
         grid_type_default = "uniform" if uniform_grid else "nonuniform"
 
-    beta_x_default = cfg.get(
-        "grid_beta_x",
-        cfg.get("runtime_nonuniform_beta_x", cfg.get(
-            "pre_nonuniform_beta_x", 2.0, float), float),
-        float,
-    )
-    beta_y_default = cfg.get(
-        "grid_beta_y",
-        cfg.get("runtime_nonuniform_beta_y", cfg.get(
-            "pre_nonuniform_beta_y", 2.0, float), float),
-        float,
-    )
-    nonuniform_mode_default = _normalize_nonuniform_mode(
-        cfg.get(
-            "grid_nonuniform_mode",
-            cfg.get("runtime_nonuniform_mode", "center-band", str),
-            str,
-        )
-    )
-    band_fraction_x_default = cfg.get("grid_band_fraction_x", 1.0 / 3.0, float)
-    band_fraction_y_default = cfg.get("grid_band_fraction_y", 1.0 / 3.0, float)
+    beta_x_default = cfg.get("grid_beta_x", 2.0, float)
+    beta_y_default = cfg.get("grid_beta_y", 2.0, float)
     uniform_x_start_default = cfg.get("grid_uniform_x_start", None, float)
     uniform_x_end_default = cfg.get("grid_uniform_x_end", None, float)
     uniform_y_start_default = cfg.get("grid_uniform_y_start", None, float)
@@ -175,6 +231,8 @@ def parse_args():
     p = argparse.ArgumentParser(description="2-D Navier-Stokes solver")
     p.add_argument("--config", type=str, default=default_config,
                    help="Path to configuration file")
+    p.add_argument("--experiment-config", type=str, default=args_pre.experiment_config,
+                   help="Path to experimental cylinder configuration file")
     p.add_argument("--post-config", type=str, default=args_pre.post_config,
                    help="Path to post-processing configuration file")
     p.add_argument("--nx",       type=int,   default=cfg.get("nx", 64, int))
@@ -209,28 +267,18 @@ def parse_args():
     p.add_argument("--beta-y", type=float,
                    default=beta_y_default,
                    help="y-direction center-density boost for nonuniform grid")
-    p.add_argument("--nonuniform-mode", type=str,
-                   choices=["center-band", "center-uniform"],
-                   default=nonuniform_mode_default,
-                   help="Nonuniform-grid generation mode")
-    p.add_argument("--band-fraction-x", type=float,
-                   default=band_fraction_x_default,
-                   help="Fraction of the x-domain width refined in the center-band mode")
-    p.add_argument("--band-fraction-y", type=float,
-                   default=band_fraction_y_default,
-                   help="Fraction of the y-domain width refined in the center-band mode")
     p.add_argument("--uniform-x-start", type=float,
                    default=uniform_x_start_default,
-                   help="Absolute x-start of the uniform core for center-uniform mode")
+                   help="Absolute x-start of the uniform core for nonuniform grids")
     p.add_argument("--uniform-x-end", type=float,
                    default=uniform_x_end_default,
-                   help="Absolute x-end of the uniform core for center-uniform mode")
+                   help="Absolute x-end of the uniform core for nonuniform grids")
     p.add_argument("--uniform-y-start", type=float,
                    default=uniform_y_start_default,
-                   help="Absolute y-start of the uniform core for center-uniform mode (use -a)")
+                   help="Absolute y-start of the uniform core for nonuniform grids (use -a)")
     p.add_argument("--uniform-y-end", type=float,
                    default=uniform_y_end_default,
-                   help="Absolute y-end of the uniform core for center-uniform mode (use +a)")
+                   help="Absolute y-end of the uniform core for nonuniform grids (use +a)")
     p.add_argument("--cylinder", type=str_to_bool, default=cfg.get("cylinder", False, bool),
                    help="Add an immersed-boundary cylinder at the domain centre")
     p.add_argument("--cylinder-radius", type=float,
@@ -242,6 +290,109 @@ def parse_args():
     p.add_argument("--cylinder-center-y", type=float,
                    default=cfg.get("cylinder_center_y", -1.0, float),
                    help="Cylinder center y-coordinate in physical units (<0 uses default ly/2)")
+    p.add_argument("--cylinder-experiment", type=str,
+                   choices=[
+                       "none",
+                       "top-indent",
+                       "simulated-sweeping-jet",
+                       "geometry-resolved-sweeping-jet",
+                   ],
+                   default=_normalize_cylinder_experiment_mode(
+                       exp_cfg.get("cylinder_experiment", "none", str)),
+                   help="High-level experimental cylinder mode")
+    p.add_argument("--cylinder-geometry-mode", type=str,
+                   choices=["circle", "circle-with-top-indent"],
+                   default=_normalize_cylinder_geometry_mode(
+                       exp_cfg.get(
+                           "cylinder_geometry_mode",
+                           exp_cfg.get("ibm_shape", "circle", str),
+                           str,
+                       )),
+                   help="Cylinder geometry mode")
+    p.add_argument("--ibm-shape", type=str,
+                   choices=["circle", "circle-with-top-indent"],
+                   default=_normalize_cylinder_geometry_mode(
+                       exp_cfg.get(
+                           "cylinder_geometry_mode",
+                           exp_cfg.get("ibm_shape", "circle", str),
+                           str,
+                       )),
+                   help="Immersed-body shape")
+    p.add_argument("--cylinder-indent-width", type=float,
+                   default=exp_cfg.get("cylinder_indent_width", 0.0, float),
+                   help="Width of the rectangular top indent for circle-with-top-indent")
+    p.add_argument("--cylinder-indent-depth", type=float,
+                   default=exp_cfg.get("cylinder_indent_depth", 0.0, float),
+                   help="Depth of the rectangular top indent for circle-with-top-indent")
+    p.add_argument("--cylinder-actuation-mode", type=str,
+                   choices=["none", "sweeping-jet", "geometry-resolved-sweeping-jet"],
+                   default=_normalize_cylinder_actuation_mode(
+                       exp_cfg.get(
+                           "cylinder_actuation_mode",
+                           exp_cfg.get("actuator_model", "none", str),
+                           str,
+                       )),
+                   help="Optional finite jet actuation model on the cylinder surface")
+    p.add_argument("--sweeping-jet-velocity-ratio", type=float,
+                   default=exp_cfg.get("sweeping_jet_velocity_ratio", 0.25, float),
+                   help="Jet speed magnitude relative to inflow_u")
+    p.add_argument("--sweeping-jet-frequency", type=float,
+                   default=exp_cfg.get("sweeping_jet_frequency", -1.0, float),
+                   help="Jet sweep frequency; <=0 uses a shedding-scale default")
+    p.add_argument("--sweeping-jet-center-deg", type=float,
+                   default=exp_cfg.get("sweeping_jet_center_deg", 90.0, float),
+                   help="Angular location of the jet outlet on the cylinder surface")
+    p.add_argument("--sweeping-jet-slot-width-deg", type=float,
+                   default=exp_cfg.get("sweeping_jet_slot_width_deg", 18.0, float),
+                   help="Angular width of the finite jet outlet")
+    p.add_argument("--sweeping-jet-slot-depth", type=float,
+                   default=exp_cfg.get("sweeping_jet_slot_depth", 0.0, float),
+                   help="Radial depth of the finite jet outlet band inside the IBM body")
+    p.add_argument("--sweeping-jet-angle-deg", type=float,
+                   default=exp_cfg.get("sweeping_jet_angle_deg", 25.0, float),
+                   help="Sweep amplitude of the jet direction relative to the local normal")
+    p.add_argument("--sweeping-jet-phase-deg", type=float,
+                   default=exp_cfg.get("sweeping_jet_phase_deg", 0.0, float),
+                   help="Phase offset for the sweeping jet direction oscillation")
+    p.add_argument("--resolved-jet-cavity-width", type=float,
+                   default=exp_cfg.get("resolved_jet_cavity_width", 0.0, float),
+                   help="Width of the internal plenum for geometry-resolved jet mode")
+    p.add_argument("--resolved-jet-cavity-height", type=float,
+                   default=exp_cfg.get("resolved_jet_cavity_height", 0.0, float),
+                   help="Height of the internal plenum for geometry-resolved jet mode")
+    p.add_argument("--resolved-jet-slot-width", type=float,
+                   default=exp_cfg.get("resolved_jet_slot_width", 0.0, float),
+                   help="Width of the exit slot for geometry-resolved jet mode")
+    p.add_argument("--resolved-jet-slot-height", type=float,
+                   default=exp_cfg.get("resolved_jet_slot_height", 0.0, float),
+                   help="Height of the exit slot for geometry-resolved jet mode")
+    p.add_argument("--resolved-jet-feed-width", type=float,
+                   default=exp_cfg.get("resolved_jet_feed_width", 0.0, float),
+                   help="Width of the internal forcing/feed patch for geometry-resolved jet mode")
+    p.add_argument("--resolved-jet-feed-height", type=float,
+                   default=exp_cfg.get("resolved_jet_feed_height", 0.0, float),
+                   help="Height of the internal forcing/feed patch for geometry-resolved jet mode")
+    p.add_argument("--resolved-jet-nozzle-length", type=float,
+                   default=exp_cfg.get("resolved_jet_nozzle_length", 0.0, float),
+                   help="Length of the tapered nozzle section between plenum and slot")
+    p.add_argument("--resolved-jet-slot-exit-width", type=float,
+                   default=exp_cfg.get("resolved_jet_slot_exit_width", 0.0, float),
+                   help="Width of the internal exit wedge where the slot meets the cylinder wall")
+    p.add_argument("--resolved-jet-island-wall-gap", type=float,
+                   default=exp_cfg.get("resolved_jet_island_wall_gap", 0.0, float),
+                   help="Gap between each floating island and the outer plenum wall")
+    p.add_argument("--resolved-jet-island-center-gap", type=float,
+                   default=exp_cfg.get("resolved_jet_island_center_gap", 0.0, float),
+                   help="Gap between the two floating islands across the center channel")
+    p.add_argument("--resolved-jet-island-leading-gap", type=float,
+                   default=exp_cfg.get("resolved_jet_island_leading_gap", 0.0, float),
+                   help="Gap from the back of the plenum to the start of each floating island")
+    p.add_argument("--resolved-jet-island-trailing-gap", type=float,
+                   default=exp_cfg.get("resolved_jet_island_trailing_gap", 0.0, float),
+                   help="Gap from the front of each floating island to the nozzle throat")
+    p.add_argument("--resolved-jet-island-taper", type=float,
+                   default=exp_cfg.get("resolved_jet_island_taper", 0.0, float),
+                   help="Taper amount applied to the front face of each floating island")
     p.add_argument("--re-is-cylinder-based", type=str_to_bool,
                    default=cfg.get("re_is_cylinder_based", True, bool),
                    help="Interpret --re as Re_D based on cylinder diameter when cylinder is enabled")
@@ -259,11 +410,44 @@ def parse_args():
     p.add_argument("--cylinder-rotation-phase-deg", type=float,
                    default=cfg.get("cylinder_rotation_phase_deg", 0.0, float),
                    help="Phase offset in degrees for oscillatory cylinder rotation")
-    p.add_argument("--plot",     type=str_to_bool, default=cfg.get("plot", False, bool),
-                   help="Show matplotlib plots after simulation")
-    p.add_argument("--plot-grid", type=str_to_bool,
-                   default=post_cfg.get("plot_grid", False, bool),
-                   help="Save a physical grid plot showing mesh concentration")
+    translation_amplitude_percent_default = cfg.get(
+        "cylinder_translation_amplitude_percent", 10.0, float
+    )
+    p.add_argument("--cylinder-translation-mode", type=str,
+                   choices=[
+                       "stationary",
+                       "oscillatory-x",
+                       "oscillatory-y",
+                       "oscillatory-xy",
+                   ],
+                   default=_normalize_cylinder_translation_mode(
+                       cfg.get("cylinder_translation_mode", "stationary", str)),
+                   help="Non-rotating cylinder translation mode")
+    p.add_argument("--cylinder-translation-amplitude-percent", type=float,
+                   default=translation_amplitude_percent_default,
+                   help="Default translation amplitude as percent of cylinder diameter")
+    p.add_argument("--cylinder-translation-x-percent", type=float,
+                   default=cfg.get(
+                       "cylinder_translation_x_percent",
+                       translation_amplitude_percent_default,
+                       float,
+                   ),
+                   help="Left/right translation amplitude as percent of cylinder diameter")
+    p.add_argument("--cylinder-translation-y-percent", type=float,
+                   default=cfg.get(
+                       "cylinder_translation_y_percent",
+                       translation_amplitude_percent_default,
+                       float,
+                   ),
+                   help="Up/down translation amplitude as percent of cylinder diameter")
+    p.add_argument("--cylinder-translation-frequency", type=float,
+                   default=cfg.get("cylinder_translation_frequency", 0.0, float),
+                   help="Oscillation frequency for cylinder translation")
+    p.add_argument("--cylinder-translation-phase-deg", type=float,
+                   default=cfg.get("cylinder_translation_phase_deg", 0.0, float),
+                   help="Phase offset in degrees for oscillatory cylinder translation")
+    p.add_argument("--plot",     type=str_to_bool, default=post_cfg.get("plot", False, bool),
+                   help="Save the standard end-of-run result figure")
     p.add_argument("--auto-generate-grid-spacing", type=str_to_bool,
                    default=post_cfg.get(
                        "auto_generate_grid_spacing", False, bool),
@@ -276,6 +460,22 @@ def parse_args():
                    default=post_cfg.get(
                        "auto_generate_aero_report", False, bool),
                    help="Automatically save the aerodynamic report after the run")
+    p.add_argument("--auto-generate-shedding-spectrum", type=str_to_bool,
+                   default=post_cfg.get(
+                       "auto_generate_shedding_spectrum", False, bool),
+                   help="Automatically save the Fourier energy spectrum of C_l")
+    p.add_argument("--auto-generate-pressure-coefficient-theta", type=str_to_bool,
+                   default=post_cfg.get(
+                       "auto_generate_pressure_coefficient_theta", False, bool),
+                   help="Automatically save C_p(theta) CSV and PNG from the latest snapshot")
+    p.add_argument("--auto-generate-time-averaged-fields", type=str_to_bool,
+                   default=post_cfg.get(
+                       "auto_generate_time_averaged_fields", False, bool),
+                   help="Automatically save time-averaged mean/RMS fields from output snapshots")
+    p.add_argument("--auto-generate-time-averaged-plots", type=str_to_bool,
+                   default=post_cfg.get(
+                       "auto_generate_time_averaged_plots", False, bool),
+                   help="Automatically save a readable PNG summary of the time-averaged fields")
     p.add_argument("--auto-generate-ibm-forcing", type=str_to_bool,
                    default=post_cfg.get(
                        "auto_generate_ibm_forcing", False, bool),
@@ -310,8 +510,8 @@ def parse_args():
     p.add_argument("--inflow-v", type=float,
                    default=cfg.get("inflow_v", 0.0, float),
                    help="Inflow/farfield y-velocity component")
-    p.add_argument("--initial-v-perturbation-pct", type=float,
-                   default=cfg.get("initial_v_perturbation_pct", 0.0, float),
+    p.add_argument("--initial-v-perturbation-percent", type=float,
+                   default=cfg.get("initial_v_perturbation_percent", 0.0, float),
                    help="One-time initial y-velocity perturbation as a percent of inflow_u")
     p.add_argument("--inflow-w", type=float,
                    default=cfg.get("inflow_w", 0.0, float),
@@ -363,13 +563,14 @@ def parse_args():
         p.error("Provide both --uniform-x-start and --uniform-x-end, or neither")
     if (args.uniform_y_start is None) != (args.uniform_y_end is None):
         p.error("Provide both --uniform-y-start and --uniform-y-end, or neither")
-    if args.nonuniform_mode == "center-uniform":
+    if args.grid_type == "nonuniform":
         if args.uniform_x_start is None or args.uniform_y_start is None:
             p.error(
-                "center-uniform mode requires explicit --uniform-x-* and --uniform-y-* bounds")
+                "nonuniform grids require explicit --uniform-x-* and --uniform-y-* bounds")
 
     args.lx = float(args.x_max - args.x_min)
     args.ly = float(args.y_max - args.y_min)
+    args.nonuniform_mode = "center-uniform"
     return args
 
 
@@ -378,33 +579,14 @@ def _grid_metadata_path(args) -> str:
     return os.path.join(args.outdir, name)
 
 
-def _expected_nonuniform_focus(args) -> tuple[float, float]:
-    focus_x = args.cylinder_center_x if args.cylinder_center_x >= 0.0 else args.x_min + 0.5 * args.lx
-    focus_y = args.cylinder_center_y if args.cylinder_center_y >= 0.0 else args.y_min + 0.5 * args.ly
-    return focus_x, focus_y
-
-
 def _expected_nonuniform_band(args) -> tuple[float, float, float, float]:
-    center_x, center_y = _expected_nonuniform_focus(args)
-    if args.nonuniform_mode == "center-uniform":
-        start_x = float(np.clip(args.uniform_x_start, args.x_min, args.x_max))
-        end_x = float(np.clip(args.uniform_x_end, args.x_min, args.x_max))
-        if end_x <= start_x:
-            raise ValueError(
-                "uniform_x_end must be greater than uniform_x_start")
+    start_x = float(np.clip(args.uniform_x_start, args.x_min, args.x_max))
+    end_x = float(np.clip(args.uniform_x_end, args.x_min, args.x_max))
+    if end_x <= start_x:
+        raise ValueError("uniform_x_end must be greater than uniform_x_start")
 
-        start_y = float(args.uniform_y_start)
-        end_y = float(args.uniform_y_end)
-        return start_x, end_x, start_y, end_y
-    else:
-        width_x = float(np.clip(args.band_fraction_x, 1e-3, 1.0)) * args.lx
-        width_y = float(np.clip(args.band_fraction_y, 1e-3, 1.0)) * args.ly
-        start_x = float(np.clip(center_x - 0.5 * width_x,
-                        args.x_min, args.x_max - width_x))
-        end_x = start_x + width_x
-        start_y = float(np.clip(center_y - 0.5 * width_y,
-                        args.y_min, args.y_max - width_y))
-        end_y = start_y + width_y
+    start_y = float(args.uniform_y_start)
+    end_y = float(args.uniform_y_end)
     return start_x, end_x, start_y, end_y
 
 
@@ -418,6 +600,436 @@ def _resolve_cylinder_geometry(args) -> tuple[float, float, float]:
     cy = args.cylinder_center_y if args.cylinder_center_y >= 0.0 else args.y_min + 0.5 * args.ly
     radius = args.cylinder_radius if args.cylinder_radius > 0.0 else args.ly / 8.0
     return cx, cy, radius
+
+
+def _resolve_cylinder_translation(args, cx: float, cy: float, radius: float) -> dict:
+    mode = _normalize_cylinder_translation_mode(args.cylinder_translation_mode)
+    diameter = 2.0 * float(radius)
+    x_percent = max(float(args.cylinder_translation_x_percent), 0.0)
+    y_percent = max(float(args.cylinder_translation_y_percent), 0.0)
+
+    amplitude_x = 0.01 * x_percent * diameter if mode in {"oscillatory-x", "oscillatory-xy"} else 0.0
+    amplitude_y = 0.01 * y_percent * diameter if mode in {"oscillatory-y", "oscillatory-xy"} else 0.0
+    frequency = max(float(args.cylinder_translation_frequency), 0.0)
+
+    if mode != "stationary" and frequency <= 0.0:
+        raise ValueError("cylinder translation requires a positive frequency")
+
+    if (
+        mode != "stationary"
+        and args.grid_type == "nonuniform"
+        and args.uniform_x_start is not None
+        and args.uniform_y_start is not None
+    ):
+        x0, x1, y0, y1 = _expected_nonuniform_band(args)
+        swept_x0 = cx - radius - amplitude_x
+        swept_x1 = cx + radius + amplitude_x
+        swept_y0 = cy - radius - amplitude_y
+        swept_y1 = cy + radius + amplitude_y
+        if swept_x0 < x0 or swept_x1 > x1 or swept_y0 < y0 or swept_y1 > y1:
+            raise ValueError(
+                "moving cylinder sweep must stay inside the concentrated mesh "
+                f"core: sweep=({swept_x0:.4g},{swept_x1:.4g}) x "
+                f"({swept_y0:.4g},{swept_y1:.4g}), core=({x0:.4g},{x1:.4g}) x "
+                f"({y0:.4g},{y1:.4g})"
+            )
+
+    return {
+        "mode": mode,
+        "amplitude_x": amplitude_x,
+        "amplitude_y": amplitude_y,
+        "frequency": frequency,
+        "phase_rad": np.deg2rad(float(args.cylinder_translation_phase_deg)),
+        "x_percent": x_percent,
+        "y_percent": y_percent,
+    }
+
+
+def _cylinder_center_at_time(args, time: float) -> tuple[float, float, float]:
+    cx, cy, radius = _resolve_cylinder_geometry(args)
+    cfg = _resolve_cylinder_translation(args, cx, cy, radius)
+    if cfg["mode"] == "stationary":
+        return cx, cy, radius
+    theta = 2.0 * np.pi * cfg["frequency"] * float(time) + cfg["phase_rad"]
+    displacement = np.sin(theta)
+    return (
+        float(cx + cfg["amplitude_x"] * displacement),
+        float(cy + cfg["amplitude_y"] * displacement),
+        radius,
+    )
+
+
+def _resolve_indent_geometry(args, radius: float) -> tuple[float, float]:
+    indent_width = float(args.cylinder_indent_width)
+    indent_depth = float(args.cylinder_indent_depth)
+    if indent_width <= 0.0:
+        indent_width = 0.6 * radius
+    if indent_depth <= 0.0:
+        indent_depth = 0.35 * radius
+    return indent_width, indent_depth
+
+
+def _resolve_sweeping_jet_geometry(args, radius: float, inflow_u: float) -> dict:
+    velocity_ratio = max(float(args.sweeping_jet_velocity_ratio), 0.0)
+    jet_speed = velocity_ratio * abs(float(inflow_u))
+    slot_depth = float(args.sweeping_jet_slot_depth)
+    if slot_depth <= 0.0:
+        slot_depth = 0.15 * radius
+
+    frequency = float(args.sweeping_jet_frequency)
+    if frequency <= 0.0:
+        diameter = 2.0 * radius
+        frequency = 0.16 * abs(float(inflow_u)) / diameter if diameter > 0.0 else 0.0
+
+    return {
+        "jet_speed": jet_speed,
+        "frequency": frequency,
+        "center_deg": float(args.sweeping_jet_center_deg),
+        "slot_width_deg": float(args.sweeping_jet_slot_width_deg),
+        "slot_depth": slot_depth,
+        "angle_deg": float(args.sweeping_jet_angle_deg),
+        "phase_rad": np.deg2rad(float(args.sweeping_jet_phase_deg)),
+    }
+
+
+def _resolve_geometry_resolved_jet_geometry(args, radius: float, inflow_u: float) -> dict:
+    jet_cfg = _resolve_sweeping_jet_geometry(args, radius, inflow_u)
+
+    cavity_width = float(args.resolved_jet_cavity_width)
+    cavity_height = float(args.resolved_jet_cavity_height)
+    slot_width = float(args.resolved_jet_slot_width)
+    slot_height = float(args.resolved_jet_slot_height)
+    feed_width = float(args.resolved_jet_feed_width)
+    feed_height = float(args.resolved_jet_feed_height)
+    nozzle_length = float(args.resolved_jet_nozzle_length)
+    slot_exit_width = float(args.resolved_jet_slot_exit_width)
+    island_wall_gap = float(args.resolved_jet_island_wall_gap)
+    island_center_gap = float(args.resolved_jet_island_center_gap)
+    island_leading_gap = float(args.resolved_jet_island_leading_gap)
+    island_trailing_gap = float(args.resolved_jet_island_trailing_gap)
+    island_taper = float(args.resolved_jet_island_taper)
+
+    if cavity_width <= 0.0:
+        cavity_width = 0.9 * radius
+    if cavity_height <= 0.0:
+        cavity_height = 0.75 * radius
+    if slot_width <= 0.0:
+        slot_width = 0.24 * radius
+    if slot_height <= 0.0:
+        slot_height = 0.18 * radius
+    if feed_width <= 0.0:
+        feed_width = 0.45 * radius
+    if feed_height <= 0.0:
+        feed_height = 0.22 * radius
+    if nozzle_length <= 0.0:
+        nozzle_length = min(
+            max(1.5 * slot_height, 0.35 * cavity_height),
+            0.65 * cavity_height,
+        )
+    plenum_depth = max(cavity_height - nozzle_length, 1e-12)
+    if slot_exit_width <= 0.0:
+        slot_exit_width = min(cavity_width, slot_width + 2.0 * slot_height)
+    if island_wall_gap <= 0.0:
+        island_wall_gap = 0.12 * cavity_width
+    if island_center_gap <= 0.0:
+        island_center_gap = max(0.22 * cavity_width, feed_width + 0.08 * cavity_width)
+    if island_leading_gap <= 0.0:
+        island_leading_gap = 0.18 * plenum_depth
+    if island_trailing_gap <= 0.0:
+        island_trailing_gap = 0.18 * plenum_depth
+
+    island_height = 0.5 * max(
+        cavity_width - 2.0 * island_wall_gap - island_center_gap,
+        0.18 * cavity_width,
+    )
+    if island_taper <= 0.0:
+        island_taper = 0.18 * island_height
+
+    jet_cfg.update({
+        "cavity_width": cavity_width,
+        "cavity_height": cavity_height,
+        "slot_width": slot_width,
+        "slot_height": slot_height,
+        "feed_width": feed_width,
+        "feed_height": feed_height,
+        "nozzle_length": nozzle_length,
+        "slot_exit_width": slot_exit_width,
+        "island_wall_gap": island_wall_gap,
+        "island_center_gap": island_center_gap,
+        "island_leading_gap": island_leading_gap,
+        "island_trailing_gap": island_trailing_gap,
+        "island_taper": island_taper,
+    })
+    return jet_cfg
+
+
+def _resolve_experiment_overrides(args) -> tuple[str, str]:
+    experiment = _normalize_cylinder_experiment_mode(
+        getattr(args, "cylinder_experiment", "none")
+    )
+    if experiment == "top-indent":
+        return "circle-with-top-indent", "none"
+    if experiment == "simulated-sweeping-jet":
+        return "circle", "sweeping-jet"
+    if experiment == "geometry-resolved-sweeping-jet":
+        return "circle", "geometry-resolved-sweeping-jet"
+
+    shape = _normalize_cylinder_geometry_mode(
+        getattr(args, "cylinder_geometry_mode", getattr(args, "ibm_shape", "circle"))
+    )
+    actuation = _normalize_cylinder_actuation_mode(
+        getattr(args, "cylinder_actuation_mode", "none")
+    )
+    return shape, actuation
+
+
+def _plot_ibm_outline(
+    ax,
+    args,
+    color: str = "white",
+    linewidth: float = 1.6,
+    time: float = 0.0,
+) -> None:
+    def local_box_points(
+        center_x: float,
+        center_y: float,
+        tangent_x: float,
+        tangent_y: float,
+        normal_x: float,
+        normal_y: float,
+        s0: float,
+        s1: float,
+        n0: float,
+        n1: float,
+    ) -> tuple[list[float], list[float]]:
+        corners = [
+            (s0, n0),
+            (s1, n0),
+            (s1, n1),
+            (s0, n1),
+            (s0, n0),
+        ]
+        x_pts = [
+            center_x + s * tangent_x + n * normal_x
+            for s, n in corners
+        ]
+        y_pts = [
+            center_y + s * tangent_y + n * normal_y
+            for s, n in corners
+        ]
+        return x_pts, y_pts
+
+    def local_poly_points(
+        center_x: float,
+        center_y: float,
+        tangent_x: float,
+        tangent_y: float,
+        normal_x: float,
+        normal_y: float,
+        corners: list[tuple[float, float]],
+    ) -> tuple[list[float], list[float]]:
+        x_pts = [
+            center_x + s * tangent_x + n * normal_x
+            for s, n in corners
+        ]
+        y_pts = [
+            center_y + s * tangent_y + n * normal_y
+            for s, n in corners
+        ]
+        return x_pts, y_pts
+
+    def local_curve_points(
+        center_x: float,
+        center_y: float,
+        tangent_x: float,
+        tangent_y: float,
+        normal_x: float,
+        normal_y: float,
+        s_vals: np.ndarray,
+        n_vals: np.ndarray,
+    ) -> tuple[list[float], list[float]]:
+        x_pts = [
+            center_x + s * tangent_x + n * normal_x
+            for s, n in zip(s_vals, n_vals)
+        ]
+        y_pts = [
+            center_y + s * tangent_y + n * normal_y
+            for s, n in zip(s_vals, n_vals)
+        ]
+        return x_pts, y_pts
+
+    cx, cy, radius = _cylinder_center_at_time(args, time)
+    shape, actuation_mode = _resolve_experiment_overrides(args)
+    theta = np.linspace(0.0, 2.0 * np.pi, 361)
+    x = cx + radius * np.cos(theta)
+    y = cy + radius * np.sin(theta)
+    if shape == "circle":
+        ax.plot(x, y, color=color, linewidth=linewidth, zorder=6)
+        if actuation_mode == "geometry-resolved-sweeping-jet":
+            jet_cfg = _resolve_geometry_resolved_jet_geometry(args, radius, 1.0)
+            slot_center_angle = np.deg2rad(jet_cfg["center_deg"])
+            normal_x = float(np.cos(slot_center_angle))
+            normal_y = float(np.sin(slot_center_angle))
+            tangent_x = float(-np.sin(slot_center_angle))
+            tangent_y = float(np.cos(slot_center_angle))
+            nozzle_length = jet_cfg["nozzle_length"]
+            plenum_n1 = radius - jet_cfg["slot_height"] - nozzle_length
+            plenum_depth = plenum_n1 - (radius - jet_cfg["slot_height"] - jet_cfg["cavity_height"])
+            cavity_x, cavity_y = local_poly_points(
+                cx, cy,
+                tangent_x, tangent_y,
+                normal_x, normal_y,
+                [
+                    (-0.5 * jet_cfg["cavity_width"], radius - jet_cfg["slot_height"] - jet_cfg["cavity_height"]),
+                    (0.5 * jet_cfg["cavity_width"], radius - jet_cfg["slot_height"] - jet_cfg["cavity_height"]),
+                    (0.5 * jet_cfg["cavity_width"], plenum_n1),
+                    (0.5 * jet_cfg["slot_width"], radius - jet_cfg["slot_height"]),
+                    (-0.5 * jet_cfg["slot_width"], radius - jet_cfg["slot_height"]),
+                    (-0.5 * jet_cfg["cavity_width"], plenum_n1),
+                    (-0.5 * jet_cfg["cavity_width"], radius - jet_cfg["slot_height"] - jet_cfg["cavity_height"]),
+                ],
+            )
+            center_gap_s = jet_cfg["island_center_gap"]
+            island_height = 0.5 * max(
+                jet_cfg["cavity_width"] - 2.0 * jet_cfg["island_wall_gap"] - center_gap_s,
+                0.18 * jet_cfg["cavity_width"],
+            )
+            island_n0 = (
+                radius - jet_cfg["slot_height"] - jet_cfg["cavity_height"]
+                + jet_cfg["island_leading_gap"]
+            )
+            island_n1 = plenum_n1 - jet_cfg["island_trailing_gap"]
+            island_taper = jet_cfg["island_taper"] if jet_cfg["island_taper"] > 0.0 else 0.18 * island_height
+            upper_s0 = 0.5 * center_gap_s
+            upper_s1 = upper_s0 + island_height
+            lower_s1 = -0.5 * center_gap_s
+            lower_s0 = lower_s1 - island_height
+            upper_splitter_x, upper_splitter_y = local_poly_points(
+                cx, cy,
+                tangent_x, tangent_y,
+                normal_x, normal_y,
+                [
+                    (upper_s0, island_n0),
+                    (upper_s1, island_n0),
+                    (upper_s1 - island_taper, island_n1),
+                    (upper_s0 + island_taper, island_n1),
+                    (upper_s0, island_n0),
+                ],
+            )
+            lower_splitter_x, lower_splitter_y = local_poly_points(
+                cx, cy,
+                tangent_x, tangent_y,
+                normal_x, normal_y,
+                [
+                    (lower_s0, island_n0),
+                    (lower_s1, island_n0),
+                    (lower_s1 - island_taper, island_n1),
+                    (lower_s0 + island_taper, island_n1),
+                    (lower_s0, island_n0),
+                ],
+            )
+            slot_exit_width = jet_cfg["slot_exit_width"]
+            slot_n0 = radius - jet_cfg["slot_height"]
+            slot_half_width0 = 0.5 * jet_cfg["slot_width"]
+            slot_half_width1 = 0.5 * slot_exit_width
+
+            def slot_minus_circle(n_val: float) -> float:
+                alpha = (n_val - slot_n0) / max(jet_cfg["slot_height"], 1e-12)
+                half_width = (1.0 - alpha) * slot_half_width0 + alpha * slot_half_width1
+                return half_width - np.sqrt(max(radius ** 2 - n_val ** 2, 0.0))
+
+            n_lo = slot_n0
+            n_hi = radius
+            for _ in range(50):
+                n_mid = 0.5 * (n_lo + n_hi)
+                if slot_minus_circle(n_mid) > 0.0:
+                    n_hi = n_mid
+                else:
+                    n_lo = n_mid
+            n_int = 0.5 * (n_lo + n_hi)
+            s_int = np.sqrt(max(radius ** 2 - n_int ** 2, 0.0))
+
+            theta_arc = np.linspace(
+                np.arctan2(-s_int, n_int),
+                np.arctan2(s_int, n_int),
+                80,
+            )
+            arc_s = radius * np.sin(theta_arc)
+            arc_n = radius * np.cos(theta_arc)
+            slot_s = np.concatenate((
+                np.array([-slot_half_width0, slot_half_width0, s_int]),
+                arc_s[::-1],
+                np.array([-s_int, -slot_half_width0]),
+            ))
+            slot_n = np.concatenate((
+                np.array([slot_n0, slot_n0, n_int]),
+                arc_n[::-1],
+                np.array([n_int, slot_n0]),
+            ))
+            slot_x, slot_y = local_curve_points(
+                cx, cy,
+                tangent_x, tangent_y,
+                normal_x, normal_y,
+                slot_s,
+                slot_n,
+            )
+            ax.plot(
+                cavity_x,
+                cavity_y,
+                color=color,
+                linewidth=linewidth * 0.9,
+                zorder=6,
+            )
+            ax.plot(
+                upper_splitter_x,
+                upper_splitter_y,
+                color=color,
+                linewidth=linewidth * 0.9,
+                zorder=6,
+            )
+            ax.plot(
+                lower_splitter_x,
+                lower_splitter_y,
+                color=color,
+                linewidth=linewidth * 0.9,
+                zorder=6,
+            )
+            ax.plot(
+                slot_x,
+                slot_y,
+                color=color,
+                linewidth=linewidth * 0.9,
+                zorder=6,
+            )
+        return
+
+    indent_width, indent_depth = _resolve_indent_geometry(args, radius)
+    notch_left = cx - 0.5 * indent_width
+    notch_right = cx + 0.5 * indent_width
+    notch_bottom = cy + radius - indent_depth
+    wall_top = cy + np.sqrt(max(radius ** 2 - (0.5 * indent_width) ** 2, 0.0))
+    notch_mask = (
+        (x >= notch_left)
+        & (x <= notch_right)
+        & (y >= notch_bottom)
+    )
+    if np.all(notch_mask):
+        ax.plot(x, y, color=color, linewidth=linewidth, zorder=6)
+        return
+
+    x_visible = x.copy()
+    y_visible = y.copy()
+    x_visible[notch_mask] = np.nan
+    y_visible[notch_mask] = np.nan
+    ax.plot(x_visible, y_visible, color=color, linewidth=linewidth, zorder=6)
+
+    ax.plot(
+        [notch_left, notch_left, notch_right, notch_right],
+        [wall_top, notch_bottom, notch_bottom, wall_top],
+        color=color,
+        linewidth=linewidth,
+        zorder=6,
+    )
 
 
 def _cylinder_angular_velocity(args, time: float) -> float:
@@ -440,17 +1052,28 @@ def _kinematic_viscosity(args, inflow_u: float, cylinder_radius: float | None) -
 
 
 def _snapshot_metadata(args, solver) -> dict:
-    return {
+    metadata = {
         "t": solver.t,
         "nx": args.nx,
         "ny": args.ny,
         "lx": args.lx,
         "ly": args.ly,
+        "x_min": args.x_min,
+        "x_max": args.x_max,
+        "y_min": args.y_min,
+        "y_max": args.y_max,
         "re": args.re,
         "ibm_force_x": solver.last_ibm_force_x,
         "ibm_force_y": solver.last_ibm_force_y,
+        "cylinder_enabled": bool(args.cylinder),
         "cylinder_omega": _cylinder_angular_velocity(args, solver.t),
     }
+    if args.cylinder:
+        cx, cy, radius = _cylinder_center_at_time(args, solver.t)
+        metadata["cylinder_center_x"] = cx
+        metadata["cylinder_center_y"] = cy
+        metadata["cylinder_radius"] = radius
+    return metadata
 
 
 def _snapshot_extra_fields(solver) -> dict:
@@ -486,19 +1109,16 @@ def _grid_matches_args(metadata: dict, grid, args) -> bool:
 
 
 def _nonuniform_metadata_matches_args(metadata: dict, args) -> bool:
-    # Only accept nonuniform files that were built with the expected mode and parameters.
+    # Only accept nonuniform files built with the current center-uniform scheme.
     mode = str(metadata.get("nonuniform_mode", "")).strip().lower()
-    if mode != args.nonuniform_mode:
+    if mode != "center-uniform":
         return False
 
-    focus_x, focus_y = _expected_nonuniform_focus(args)
     band_start_x, band_end_x, band_start_y, band_end_y = _expected_nonuniform_band(
         args)
     common_matches = (
         np.isclose(float(metadata.get("beta_x", np.nan)), float(args.beta_x)) and
         np.isclose(float(metadata.get("beta_y", np.nan)), float(args.beta_y)) and
-        np.isclose(float(metadata.get("focus_x", np.nan)), float(focus_x)) and
-        np.isclose(float(metadata.get("focus_y", np.nan)), float(focus_y)) and
         np.isclose(float(metadata.get("band_start_x", np.nan)), float(band_start_x)) and
         np.isclose(float(metadata.get("band_end_x", np.nan)), float(band_end_x)) and
         np.isclose(float(metadata.get("band_start_y", np.nan)), float(band_start_y)) and
@@ -511,35 +1131,25 @@ def _nonuniform_metadata_matches_args(metadata: dict, args) -> bool:
     def _both_nan_or_close(a: float, b: float) -> bool:
         return (np.isnan(a) and np.isnan(b)) or np.isclose(a, b)
 
-    if mode == "center-uniform":
-        meta_uniform_x_start = metadata.get("uniform_x_start", np.nan)
-        meta_uniform_x_end = metadata.get("uniform_x_end", np.nan)
-        meta_uniform_y_start = metadata.get("uniform_y_start", np.nan)
-        meta_uniform_y_end = metadata.get("uniform_y_end", np.nan)
+    meta_uniform_x_start = metadata.get("uniform_x_start", np.nan)
+    meta_uniform_x_end = metadata.get("uniform_x_end", np.nan)
+    meta_uniform_y_start = metadata.get("uniform_y_start", np.nan)
+    meta_uniform_y_end = metadata.get("uniform_y_end", np.nan)
 
-        expected_uniform_x_start = np.nan if args.uniform_x_start is None else float(
-            args.uniform_x_start)
-        expected_uniform_x_end = np.nan if args.uniform_x_end is None else float(
-            args.uniform_x_end)
-        expected_uniform_y_start = np.nan if args.uniform_y_start is None else float(
-            args.uniform_y_start)
-        expected_uniform_y_end = np.nan if args.uniform_y_end is None else float(
-            args.uniform_y_end)
-
-        interval_matches = (
-            _both_nan_or_close(float(meta_uniform_x_start), expected_uniform_x_start) and
-            _both_nan_or_close(float(meta_uniform_x_end), expected_uniform_x_end) and
-            _both_nan_or_close(float(meta_uniform_y_start), expected_uniform_y_start) and
-            _both_nan_or_close(float(meta_uniform_y_end),
-                               expected_uniform_y_end)
-        )
-        return interval_matches
+    expected_uniform_x_start = np.nan if args.uniform_x_start is None else float(
+        args.uniform_x_start)
+    expected_uniform_x_end = np.nan if args.uniform_x_end is None else float(
+        args.uniform_x_end)
+    expected_uniform_y_start = np.nan if args.uniform_y_start is None else float(
+        args.uniform_y_start)
+    expected_uniform_y_end = np.nan if args.uniform_y_end is None else float(
+        args.uniform_y_end)
 
     return (
-        np.isclose(float(metadata.get("band_fraction_x", np.nan)),
-                   float(args.band_fraction_x)) and
-        np.isclose(float(metadata.get("band_fraction_y", np.nan)),
-                   float(args.band_fraction_y))
+        _both_nan_or_close(float(meta_uniform_x_start), expected_uniform_x_start) and
+        _both_nan_or_close(float(meta_uniform_x_end), expected_uniform_x_end) and
+        _both_nan_or_close(float(meta_uniform_y_start), expected_uniform_y_start) and
+        _both_nan_or_close(float(meta_uniform_y_end), expected_uniform_y_end)
     )
 
 
@@ -558,7 +1168,6 @@ def prepare_uniform_grid(args):
 
 def prepare_nonuniform_grid(args):
     """Build the runtime non-uniform grid and write its metadata before startup."""
-    focus_x, focus_y = _expected_nonuniform_focus(args)
     metadata = build_nonuniform_grid_metadata(
         nx=args.nx,
         ny=args.ny,
@@ -568,11 +1177,6 @@ def prepare_nonuniform_grid(args):
         beta_y=args.beta_y,
         x_min=args.x_min,
         y_min=args.y_min,
-        focus_x=focus_x,
-        focus_y=focus_y,
-        band_fraction_x=args.band_fraction_x,
-        band_fraction_y=args.band_fraction_y,
-        nonuniform_mode=args.nonuniform_mode,
         uniform_x_start=args.uniform_x_start,
         uniform_x_end=args.uniform_x_end,
         uniform_y_start=args.uniform_y_start,
@@ -594,7 +1198,7 @@ def get_runtime_grid(args):
                 if args.grid_type == "nonuniform" and not _nonuniform_metadata_matches_args(metadata, args):
                     print(
                         "Warning: Prepared nonuniform grid metadata does not match "
-                        "requested beta/band settings; regenerating grid."
+                        "requested beta/core settings; regenerating grid."
                     )
                 else:
                     return grid, True
@@ -623,7 +1227,7 @@ def run(args, grid=None, grid_loaded_from_file=False):
         print(f"  Grid          : {args.nx} x {args.ny}")
         print(f"  Grid type     : {args.grid_type}")
         if args.grid_type == "nonuniform":
-            print(f"  Grid mode     : {args.nonuniform_mode}")
+            print("  Grid mode     : center-uniform")
         print(
             "  Domain        : "
             f"x=[{args.x_min}, {args.x_max}] (Lx={args.lx}), "
@@ -674,8 +1278,45 @@ def run(args, grid=None, grid_loaded_from_file=False):
     r = None
     if args.cylinder:
         cx, cy, r = _resolve_cylinder_geometry(args)
+        ibm_shape, actuation_mode = _resolve_experiment_overrides(args)
         rotation_mode = _normalize_cylinder_rotation_mode(args.cylinder_rotation_mode)
-        if rotation_mode == "oscillatory":
+        translation_cfg = _resolve_cylinder_translation(args, cx, cy, r)
+        translation_mode = translation_cfg["mode"]
+        if ibm_shape != "circle" and rotation_mode != "stationary":
+            raise ValueError(
+                "circle-with-top-indent currently supports stationary IBM bodies only"
+            )
+        if ibm_shape != "circle" and translation_mode != "stationary":
+            raise ValueError(
+                "circle-with-top-indent currently supports stationary IBM bodies only"
+            )
+        if rotation_mode != "stationary" and translation_mode != "stationary":
+            raise ValueError(
+                "cylinder rotation and cylinder translation are mutually exclusive"
+            )
+        if actuation_mode != "none" and ibm_shape != "circle":
+            raise ValueError(
+                "jet actuation currently supports circle geometry only"
+            )
+        if actuation_mode != "none" and rotation_mode != "stationary":
+            raise ValueError(
+                "jet actuation currently supports stationary cylinders only"
+            )
+        if actuation_mode != "none" and translation_mode != "stationary":
+            raise ValueError(
+                "jet actuation currently supports stationary cylinders only"
+            )
+        if translation_mode != "stationary":
+            ibm.add_translating_circle(
+                cx,
+                cy,
+                r,
+                amplitude_x=translation_cfg["amplitude_x"],
+                amplitude_y=translation_cfg["amplitude_y"],
+                frequency=translation_cfg["frequency"],
+                phase=translation_cfg["phase_rad"],
+            )
+        elif rotation_mode == "oscillatory":
             ibm.add_rotating_circle(
                 cx,
                 cy,
@@ -692,9 +1333,89 @@ def run(args, grid=None, grid_loaded_from_file=False):
                 omega=args.cylinder_rotation_amplitude,
             )
         else:
-            ibm.add_circle(cx, cy, r)
+            if ibm_shape == "circle-with-top-indent":
+                indent_width, indent_depth = _resolve_indent_geometry(args, r)
+                ibm.add_circle_with_top_indent(
+                    cx,
+                    cy,
+                    r,
+                    indent_width=indent_width,
+                    indent_depth=indent_depth,
+                )
+            else:
+                ibm.add_circle(cx, cy, r)
+        if actuation_mode == "sweeping-jet":
+            jet_cfg = _resolve_sweeping_jet_geometry(args, r, bc.u_inf)
+            ibm.add_sweeping_jet_circle(
+                cx=cx,
+                cy=cy,
+                radius=r,
+                jet_speed=jet_cfg["jet_speed"],
+                slot_center_angle_deg=jet_cfg["center_deg"],
+                slot_width_angle_deg=jet_cfg["slot_width_deg"],
+                slot_depth=jet_cfg["slot_depth"],
+                sweep_amplitude_deg=jet_cfg["angle_deg"],
+                frequency=jet_cfg["frequency"],
+                phase=jet_cfg["phase_rad"],
+            )
+        elif actuation_mode == "geometry-resolved-sweeping-jet":
+            jet_cfg = _resolve_geometry_resolved_jet_geometry(args, r, bc.u_inf)
+            ibm.add_geometry_resolved_sweeping_jet_circle(
+                cx=cx,
+                cy=cy,
+                radius=r,
+                jet_speed=jet_cfg["jet_speed"],
+                cavity_width=jet_cfg["cavity_width"],
+                cavity_height=jet_cfg["cavity_height"],
+                slot_width=jet_cfg["slot_width"],
+                slot_height=jet_cfg["slot_height"],
+                feed_width=jet_cfg["feed_width"],
+                feed_height=jet_cfg["feed_height"],
+                nozzle_length=jet_cfg["nozzle_length"],
+                slot_exit_width=jet_cfg["slot_exit_width"],
+                island_wall_gap=jet_cfg["island_wall_gap"],
+                island_center_gap=jet_cfg["island_center_gap"],
+                island_leading_gap=jet_cfg["island_leading_gap"],
+                island_trailing_gap=jet_cfg["island_trailing_gap"],
+                island_taper=jet_cfg["island_taper"],
+                slot_center_angle_deg=jet_cfg["center_deg"],
+                sweep_amplitude_deg=jet_cfg["angle_deg"],
+                frequency=jet_cfg["frequency"],
+                phase=jet_cfg["phase_rad"],
+            )
         if is_root and args.verbose:
-            print(f"  IBM cylinder: centre=({cx:.2f},{cy:.2f}), r={r:.4f}")
+            print(
+                f"  IBM cylinder: centre=({cx:.2f},{cy:.2f}), r={r:.4f}, "
+                f"shape={ibm_shape}, experiment={_normalize_cylinder_experiment_mode(args.cylinder_experiment)}"
+            )
+            if ibm_shape == "circle-with-top-indent":
+                indent_width, indent_depth = _resolve_indent_geometry(args, r)
+                print(
+                    "  Top indent   : "
+                    f"width={indent_width:.4f}, depth={indent_depth:.4f}"
+                )
+            if actuation_mode == "sweeping-jet":
+                jet_cfg = _resolve_sweeping_jet_geometry(args, r, bc.u_inf)
+                print(
+                    "  Jet actuator : "
+                    f"speed={jet_cfg['jet_speed']:.4f}, "
+                    f"f={jet_cfg['frequency']:.4f}, "
+                    f"slot_center={jet_cfg['center_deg']:.2f} deg, "
+                    f"slot_width={jet_cfg['slot_width_deg']:.2f} deg, "
+                    f"slot_depth={jet_cfg['slot_depth']:.4f}, "
+                    f"sweep={jet_cfg['angle_deg']:.2f} deg"
+                )
+            elif actuation_mode == "geometry-resolved-sweeping-jet":
+                jet_cfg = _resolve_geometry_resolved_jet_geometry(args, r, bc.u_inf)
+                print(
+                    "  Jet actuator : "
+                    f"mode=geometry-resolved, speed={jet_cfg['jet_speed']:.4f}, "
+                    f"f={jet_cfg['frequency']:.4f}, "
+                    f"cavity=({jet_cfg['cavity_width']:.4f} x {jet_cfg['cavity_height']:.4f}), "
+                    f"slot=({jet_cfg['slot_width']:.4f} x {jet_cfg['slot_height']:.4f}), "
+                    f"feed=({jet_cfg['feed_width']:.4f} x {jet_cfg['feed_height']:.4f}), "
+                    f"sweep={jet_cfg['angle_deg']:.2f} deg"
+                )
             if rotation_mode == "oscillatory":
                 print(
                     "  Cylinder rot.: "
@@ -706,6 +1427,17 @@ def run(args, grid=None, grid_loaded_from_file=False):
                 print(
                     "  Cylinder rot.: "
                     f"omega(t)={args.cylinder_rotation_amplitude:.4g}"
+                )
+            if translation_mode != "stationary":
+                print(
+                    "  Cylinder move: "
+                    f"mode={translation_mode}, "
+                    f"Ax={translation_cfg['amplitude_x']:.4g} "
+                    f"({translation_cfg['x_percent']:.4g}% D), "
+                    f"Ay={translation_cfg['amplitude_y']:.4g} "
+                    f"({translation_cfg['y_percent']:.4g}% D), "
+                    f"f={translation_cfg['frequency']:.4g}, "
+                    f"phase={args.cylinder_translation_phase_deg:.4g} deg"
                 )
 
     # ------------------------------------------------------------------
@@ -719,17 +1451,17 @@ def run(args, grid=None, grid_loaded_from_file=False):
             f"  Re interpretation: Re_D={args.re} with D={d_cyl:.4f} -> nu={nu:.6g}")
 
     initial_v_perturbation = 0.01 * \
-        args.initial_v_perturbation_pct * bc.u_inf
+        args.initial_v_perturbation_percent * bc.u_inf
     solver = FractionalStepSolver(grid, bc, nu, ibm=ibm)
     solver.init_fields(
         u0=bc.u_inf,
         v0=bc.v_inf,
         initial_v_perturbation=initial_v_perturbation,
     )
-    if is_root and args.verbose and args.initial_v_perturbation_pct != 0.0:
+    if is_root and args.verbose and args.initial_v_perturbation_percent != 0.0:
         print(
             "  Initial v perturbation: "
-            f"{args.initial_v_perturbation_pct:.3g}% of inflow_u "
+            f"{args.initial_v_perturbation_percent:.3g}% of inflow_u "
             f"-> dv={initial_v_perturbation:.6g}"
         )
 
@@ -783,8 +1515,6 @@ def run(args, grid=None, grid_loaded_from_file=False):
     # ------------------------------------------------------------------
     # Optional plot
     # ------------------------------------------------------------------
-    if args.plot_grid and is_root:
-        _plot_grid(grid, args)
     if args.plot and is_root:
         _plot_results(solver, grid, args)
 
@@ -821,23 +1551,10 @@ def _plot_results(solver, grid, args):
     fig, axes = plt.subplots(1, 2, figsize=(10, 4))
 
     if args.cylinder:
-        from matplotlib.patches import Circle
-        cx, cy, radius = _resolve_cylinder_geometry(args)
-
         # Draw the immersed cylinder on every panel so geometry alignment
         # is visible in vorticity, pressure, and velocity plots.
         for ax in axes:
-            edge_color = "white"
-            ax.add_patch(
-                Circle(
-                    (cx, cy),
-                    radius,
-                    fill=False,
-                    ec=edge_color,
-                    lw=1.6,
-                    zorder=6,
-                )
-            )
+            _plot_ibm_outline(ax, args, color="black", linewidth=1.6, time=solver.t)
 
     # Vorticity: use robust clipping + high-contrast diverging map
     # so coherent structures are easier to read.
@@ -965,32 +1682,12 @@ def _plot_grid(grid, args):
         )
 
     if args.cylinder:
-        from matplotlib.patches import Circle
-        cx, cy, radius = _resolve_cylinder_geometry(args)
-        mesh_ax.add_patch(
-            Circle(
-                (cx, cy),
-                radius,
-                fill=False,
-                ec="#001219",
-                lw=1.8,
-                zorder=5,
-            )
-        )
-        density_ax.add_patch(
-            Circle(
-                (cx, cy),
-                radius,
-                fill=False,
-                ec="white",
-                lw=1.6,
-                zorder=5,
-            )
-        )
+        _plot_ibm_outline(mesh_ax, args, color="#001219", linewidth=1.8)
+        _plot_ibm_outline(density_ax, args, color="white", linewidth=1.6)
 
     fig.suptitle(
         f"Grid type={args.grid_type}"
-        f"{', mode=' + args.nonuniform_mode if args.grid_type == 'nonuniform' else ''}, "
+        f"{', mode=center-uniform' if args.grid_type == 'nonuniform' else ''}, "
         f"nx={grid.nx}, ny={grid.ny}, "
         f"dx_min={grid.dx_min:.4g}, dy_min={grid.dy_min:.4g}"
     )
@@ -1008,7 +1705,11 @@ def _run_auto_outputs(grid, args):
     if args.auto_generate_grid_spacing:
         _plot_grid(grid, args)
 
-    need_aero_series = args.auto_generate_coeff_history or args.auto_generate_aero_report
+    need_aero_series = (
+        args.auto_generate_coeff_history
+        or args.auto_generate_aero_report
+        or args.auto_generate_shedding_spectrum
+    )
     aero_series_path = os.path.join(results_dir, "aero.csv")
     aero_report_path = os.path.join(results_dir, "aero_report.txt")
     aero_ready = False
@@ -1052,8 +1753,36 @@ def _run_auto_outputs(grid, args):
                 "the aerodynamic series was not generated."
             )
 
+    if args.auto_generate_shedding_spectrum:
+        if aero_ready:
+            try:
+                _, _, r = _resolve_cylinder_geometry(args)
+                char_length = 2.0 * r if args.cylinder else 1.0
+                plot_shedding_spectrum(
+                    aero_series_path,
+                    save_name="shedding_spectrum.png",
+                    t_min=args.auto_aero_t_min,
+                    f_min=0.05,
+                    f_max=2.0,
+                    char_length=char_length,
+                    u_ref=args.inflow_u,
+                )
+            except Exception as exc:
+                print(
+                    f"  Warning: automatic shedding-spectrum plot failed: {exc}"
+                )
+        else:
+            print(
+                "  Warning: automatic shedding-spectrum plot skipped because "
+                "the aerodynamic series was not generated."
+            )
+
     latest_snapshot = None
-    if args.auto_generate_ibm_forcing or args.auto_generate_vorticity_video:
+    if (
+        args.auto_generate_ibm_forcing
+        or args.auto_generate_vorticity_video
+        or args.auto_generate_pressure_coefficient_theta
+    ):
         latest_snapshot = find_latest_snapshot(dirpath=args.outdir)
         if latest_snapshot is None:
             print(
@@ -1066,6 +1795,23 @@ def _run_auto_outputs(grid, args):
         except Exception as exc:
             print(f"  Warning: automatic IBM-forcing plot failed: {exc}")
 
+    if args.auto_generate_pressure_coefficient_theta:
+        try:
+            cx, cy, r = _resolve_cylinder_geometry(args)
+            save_pressure_coefficient_report(
+                latest_snapshot,
+                u_ref=args.inflow_u,
+                save_csv="pressure_coefficient_theta.csv",
+                save_plot="pressure_coefficient_theta.png",
+                config_path=args.config,
+                cylinder_center=(cx, cy),
+                cylinder_radius=r,
+            )
+        except Exception as exc:
+            print(
+                f"  Warning: automatic pressure-coefficient report failed: {exc}"
+            )
+
     if args.auto_generate_vorticity_video:
         try:
             plot_vorticity_video(
@@ -1073,9 +1819,32 @@ def _run_auto_outputs(grid, args):
                 save_name="vorticity.gif",
                 frame_stride=max(int(args.auto_vorticity_video_frame_stride), 1),
                 verbose=bool(args.verbose),
+                config_path=args.config,
             )
         except Exception as exc:
             print(f"  Warning: automatic vorticity video failed: {exc}")
+
+    if args.auto_generate_time_averaged_fields or args.auto_generate_time_averaged_plots:
+        try:
+            averaged_path = save_time_averaged_fields(
+                indir=args.outdir,
+                t_min=args.auto_aero_t_min,
+                results_dir=results_dir,
+                save_name="time_averaged_fields.npz",
+            )
+            print(
+                f"Saved time-averaged fields: "
+                f"{os.path.join(results_dir, 'time_averaged_fields.npz')}"
+            )
+            if args.auto_generate_time_averaged_plots:
+                plot_path = plot_time_averaged_fields(
+                    averaged_path,
+                    save_name="time_averaged_fields.png",
+                    results_dir=results_dir,
+                )
+                print(f"Saved time-averaged field plot: {plot_path}")
+        except Exception as exc:
+            print(f"  Warning: automatic time-averaged fields failed: {exc}")
 
 
 # ---------------------------------------------------------------------------

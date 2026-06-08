@@ -87,6 +87,31 @@ class TestConvectiveOutflow:
         # For uniform u=1, the convective update gives no change
         assert np.allclose(u[g.nx, :], 1.0, atol=1e-12)
 
+    def test_outflow_uses_speed_magnitude_for_negative_reference_velocity(self):
+        """Convective outflow should stay dissipative even for negative reference speed."""
+        g = make_grid()
+        bc = BoundaryConfig(
+            left=BCType.INFLOW,
+            right=BCType.OUTFLOW,
+            bottom=BCType.WALL,
+            top=BCType.OUTFLOW,
+            u_inf=-2.0,
+            v_inf=-3.0,
+        )
+        u = np.zeros(g.u_shape)
+        v = np.zeros(g.v_shape)
+        u[g.nx - 1, :] = 1.0
+        u[g.nx, :] = 4.0
+        v[:, g.ny - 1] = 2.0
+        v[:, g.ny] = 5.0
+
+        apply_velocity_bc(u, v, g, bc, dt=0.05)
+
+        right_expected = 4.0 - (2.0 * 0.05 / g.dx_min) * (4.0 - 1.0)
+        top_expected = 5.0 - (3.0 * 0.05 / g.dy_min) * (5.0 - 2.0)
+        assert np.allclose(u[g.nx, :], right_expected)
+        assert np.allclose(v[1:, g.ny], top_expected)
+
 
 class TestPressureBC:
     def test_neumann_left(self):

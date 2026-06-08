@@ -180,6 +180,27 @@ class TestIBMForcing:
         assert np.isfinite(solver.last_ibm_force_x)
         assert np.isfinite(solver.last_ibm_force_y)
 
+    def test_indented_ibm_solid_cells_zero_after_step(self):
+        g = CartesianGrid(64, 64, lx=2.0, ly=2.0)
+        bc = channel_bc()
+        ibm = ImmersedBoundary(g)
+        ibm.add_circle_with_top_indent(
+            cx=0.6,
+            cy=1.0,
+            radius=0.25,
+            indent_width=0.15,
+            indent_depth=0.08,
+        )
+
+        solver = FractionalStepSolver(g, bc, nu=0.01, ibm=ibm)
+        solver.init_fields(u0=1.0)
+
+        dt = solver.suggest_dt(cfl_target=0.3)
+        solver.step(dt)
+
+        assert np.allclose(solver.u[ibm.mask_u], 0.0, atol=1e-12)
+        assert np.allclose(solver.v[ibm.mask_v], 0.0, atol=1e-12)
+
     def test_ibm_forcing_fields_are_available_for_snapshots(self):
         """IBM forcing fields should be tracked on faces and cell centres."""
         g = CartesianGrid(20, 12, lx=2.0, ly=1.0)
@@ -243,6 +264,63 @@ class TestIBMForcing:
 
         assert np.any(np.abs(solver.u[ibm.mask_u]) > 0.0)
         assert np.any(np.abs(solver.v[ibm.mask_v]) > 0.0)
+
+    def test_sweeping_jet_circle_imposes_localized_nonzero_velocity(self):
+        g = CartesianGrid(64, 64, lx=2.0, ly=2.0)
+        bc = channel_bc()
+        ibm = ImmersedBoundary(g)
+        ibm.add_sweeping_jet_circle(
+            cx=0.6,
+            cy=1.0,
+            radius=0.25,
+            jet_speed=0.5,
+            slot_center_angle_deg=90.0,
+            slot_width_angle_deg=18.0,
+            slot_depth=0.05,
+            sweep_amplitude_deg=0.0,
+            frequency=0.0,
+        )
+
+        solver = FractionalStepSolver(g, bc, nu=0.01, ibm=ibm)
+        solver.init_fields(u0=1.0)
+
+        dt = solver.suggest_dt(cfl_target=0.3)
+        solver.step(dt)
+
+        spec = ibm.sweeping_jets[0]
+        assert np.any(np.abs(solver.u[spec.mask_u]) > 0.0)
+        assert np.any(np.abs(solver.v[spec.mask_v]) > 0.0)
+        nonjet_v = ibm.mask_v & ~spec.mask_v
+        assert np.allclose(solver.v[nonjet_v], 0.0, atol=1e-12)
+
+    def test_geometry_resolved_jet_imposes_internal_feed_velocity(self):
+        g = CartesianGrid(96, 96, lx=2.0, ly=2.0)
+        bc = channel_bc()
+        ibm = ImmersedBoundary(g)
+        ibm.add_geometry_resolved_sweeping_jet_circle(
+            cx=0.6,
+            cy=1.0,
+            radius=0.25,
+            jet_speed=0.5,
+            cavity_width=0.22,
+            cavity_height=0.18,
+            slot_width=0.06,
+            slot_height=0.04,
+            feed_width=0.10,
+            feed_height=0.05,
+            sweep_amplitude_deg=0.0,
+            frequency=0.0,
+        )
+
+        solver = FractionalStepSolver(g, bc, nu=0.01, ibm=ibm)
+        solver.init_fields(u0=1.0)
+
+        dt = solver.suggest_dt(cfl_target=0.3)
+        solver.step(dt)
+
+        spec = ibm.oscillating_jet_patches[0]
+        assert np.any(np.abs(solver.u[spec.mask_u]) > 0.0)
+        assert np.any(np.abs(solver.v[spec.mask_v]) > 0.0)
 
 
 # ---------------------------------------------------------------------------

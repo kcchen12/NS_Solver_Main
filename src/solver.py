@@ -72,6 +72,10 @@ class FractionalStepSolver:
         self.nu = nu
         self.ibm = ibm
         self._poisson = PoissonSolver(grid, bc)
+        self._dxc = grid.dxc[:, np.newaxis]
+        self._dyc = grid.dyc[np.newaxis, :]
+        self._dx_cells = grid.dx_cells[:, np.newaxis]
+        self._dy_cells = grid.dy_cells[np.newaxis, :]
 
         # Field arrays (initialised by caller via init_fields)
         self.u = grid.zeros_u()
@@ -168,14 +172,10 @@ class FractionalStepSolver:
         # Step 3 — Velocity correction
         # ----------------------------------------------------------------
         # Interior x-faces: i = 1 .. nx-1
-        u_new = u_star.copy()
-        dxc = grid.dxc[:, np.newaxis]
-        u_new[1:-1, :] -= dt * (phi[1:, :] - phi[:-1, :]) / dxc
+        u_star[1:-1, :] -= dt * (phi[1:, :] - phi[:-1, :]) / self._dxc
 
         # Interior y-faces: j = 1 .. ny-1
-        v_new = v_star.copy()
-        dyc = grid.dyc[np.newaxis, :]
-        v_new[:, 1:-1] -= dt * (phi[:, 1:] - phi[:, :-1]) / dyc
+        v_star[:, 1:-1] -= dt * (phi[:, 1:] - phi[:, :-1]) / self._dyc
 
         # ----------------------------------------------------------------
         # Step 4 — Pressure update
@@ -187,11 +187,11 @@ class FractionalStepSolver:
         # (wall no-penetration + outflow; NOT inflow tangential v, which
         #  would override the pressure-corrected values)
         # ----------------------------------------------------------------
-        apply_post_correction_bc(u_new, v_new, grid, bc, dt=dt)
+        apply_post_correction_bc(u_star, v_star, grid, bc, dt=dt)
         if self.ibm is not None and self.ibm.has_solid:
             _, _, self.last_ibm_forcing_u, self.last_ibm_forcing_v = self.ibm.apply(
-                u_new,
-                v_new,
+                u_star,
+                v_star,
                 dt=dt,
                 return_face_forcing=True,
                 time=self.t + dt,
@@ -205,8 +205,8 @@ class FractionalStepSolver:
                 self.last_ibm_forcing_v[:, 1:]
             )
 
-        self.u = u_new
-        self.v = v_new
+        self.u = u_star
+        self.v = v_star
         self.t += dt
 
     # ------------------------------------------------------------------
@@ -223,8 +223,8 @@ class FractionalStepSolver:
         # Interpolate u, v to cell centres for CFL estimate
         u_c = 0.5 * (self.u[:-1, :] + self.u[1:, :])
         v_c = 0.5 * (self.v[:, :-1] + self.v[:, 1:])
-        cfl_x = np.max(np.abs(u_c) * dt / grid.dx_cells[:, np.newaxis])
-        cfl_y = np.max(np.abs(v_c) * dt / grid.dy_cells[np.newaxis, :])
+        cfl_x = np.max(np.abs(u_c) * dt / self._dx_cells)
+        cfl_y = np.max(np.abs(v_c) * dt / self._dy_cells)
         return float(max(cfl_x, cfl_y))
 
     def suggest_dt(self, cfl_target: float = 0.5, dt_max: float = 0.1) -> float:

@@ -82,6 +82,119 @@ class TestIBMCircle:
         assert self.ibm.mask_v[i_v, j_v]
         assert np.isclose(v[i_v, j_v], omega * (self.g.xc[i_v] - cx))
 
+    def test_translating_circle_imposes_linear_velocity_and_moves_mask(self):
+        cx, cy, r = 1.0, 0.75, 0.2
+        amplitude_x = 0.1
+        frequency = 0.5
+        self.ibm.add_translating_circle(
+            cx,
+            cy,
+            r,
+            amplitude_x=amplitude_x,
+            amplitude_y=0.0,
+            frequency=frequency,
+            phase=0.0,
+        )
+        u = np.zeros(self.g.u_shape)
+        v = np.zeros(self.g.v_shape)
+        self.ibm.apply(u, v, time=0.0)
+
+        expected_u = 2.0 * np.pi * frequency * amplitude_x
+        assert np.allclose(u[self.ibm.mask_u], expected_u)
+        assert np.allclose(v[self.ibm.mask_v], 0.0)
+
+        self.ibm.apply(u, v, time=0.5)
+        moved_cx = cx + amplitude_x
+        i_u = int(np.argmin(np.abs(self.g.xf - moved_cx)))
+        j_u = int(np.argmin(np.abs(self.g.yc - cy)))
+        assert self.ibm.mask_u[i_u, j_u]
+
+    def test_translating_circle_supports_vertical_motion(self):
+        cx, cy, r = 1.0, 0.75, 0.2
+        amplitude_y = 0.075
+        frequency = 0.25
+        self.ibm.add_translating_circle(
+            cx,
+            cy,
+            r,
+            amplitude_x=0.0,
+            amplitude_y=amplitude_y,
+            frequency=frequency,
+            phase=0.0,
+        )
+        u = np.zeros(self.g.u_shape)
+        v = np.zeros(self.g.v_shape)
+        self.ibm.apply(u, v, time=0.0)
+
+        expected_v = 2.0 * np.pi * frequency * amplitude_y
+        assert np.allclose(u[self.ibm.mask_u], 0.0)
+        assert np.allclose(v[self.ibm.mask_v], expected_v)
+
+    def test_translating_force_diagnostic_uses_regularized_circle_weight(self):
+        cx, cy, r = 1.0, 0.75, 0.22
+        self.ibm.add_translating_circle(
+            cx,
+            cy,
+            r,
+            amplitude_x=0.0,
+            amplitude_y=0.0,
+            frequency=0.0,
+        )
+        u = np.ones(self.g.u_shape)
+        v = np.ones(self.g.v_shape) * 2.0
+
+        force_x, force_y = self.ibm.apply(u, v, dt=1.0, rho=1.0, time=0.0)
+
+        weight_u = self.ibm._circle_force_weight(
+            self.ibm._u_x,
+            self.ibm._u_y,
+            cx,
+            cy,
+            r,
+            self.ibm._force_regularization_width,
+        )
+        weight_v = self.ibm._circle_force_weight(
+            self.ibm._v_x,
+            self.ibm._v_y,
+            cx,
+            cy,
+            r,
+            self.ibm._force_regularization_width,
+        )
+        expected_fx = np.sum(self.ibm._u_face_measure * weight_u)
+        expected_fy = np.sum(2.0 * self.ibm._v_face_measure * weight_v)
+
+        assert np.isclose(force_x, expected_fx)
+        assert np.isclose(force_y, expected_fy)
+
+    def test_force_diagnostic_uses_local_face_measures_on_nonuniform_grid(self):
+        xf = np.array([0.0, 0.2, 0.6, 1.0], dtype=float)
+        yf = np.array([0.0, 0.1, 0.4, 1.0], dtype=float)
+        g = CartesianGrid(3, 3, lx=1.0, ly=1.0, xf=xf, yf=yf)
+        ibm = ImmersedBoundary(g)
+
+        mask_u = np.zeros(g.u_shape, dtype=bool)
+        mask_v = np.zeros(g.v_shape, dtype=bool)
+        mask_u[1, 0] = True
+        mask_u[2, 2] = True
+        mask_v[0, 1] = True
+        mask_v[2, 2] = True
+        ibm.add_mask(mask_u, mask_v)
+
+        u = np.zeros(g.u_shape)
+        v = np.zeros(g.v_shape)
+        u[1, 0] = 2.0
+        u[2, 2] = 3.0
+        v[0, 1] = 5.0
+        v[2, 2] = 7.0
+
+        force_x, force_y = ibm.apply(u, v, dt=0.5, rho=1.0, time=0.0)
+
+        expected_fx = (2.0 * g.dy_cells[0] + 3.0 * g.dy_cells[2]) / 0.5
+        expected_fy = (5.0 * g.dx_cells[0] + 7.0 * g.dx_cells[2]) / 0.5
+        assert np.isclose(force_x, expected_fx)
+        assert np.isclose(force_y, expected_fy)
+
 
 class TestIBMRectangle:
     def test_add_rectangle(self):
@@ -99,3 +212,125 @@ class TestIBMRectangle:
         i_c = int(np.argmin(np.abs(g.xf - 0.5)))
         j_c = int(np.argmin(np.abs(g.yc - 0.5)))
         assert ibm.mask_u[i_c, j_c]
+
+    def test_add_mask_rejects_wrong_shape(self):
+        g = CartesianGrid(8, 6, lx=1.0, ly=1.0)
+        ibm = ImmersedBoundary(g)
+        with pytest.raises(ValueError):
+            ibm.add_mask(np.zeros((1, 1), dtype=bool), np.zeros(g.v_shape, dtype=bool))
+        with pytest.raises(ValueError):
+            ibm.add_mask(np.zeros(g.u_shape, dtype=bool), np.zeros((1, 1), dtype=bool))
+
+
+class TestIBMIndentedCircle:
+    def test_top_indent_clears_top_center(self):
+        g = CartesianGrid(80, 80, lx=2.0, ly=2.0)
+        ibm = ImmersedBoundary(g)
+        cx, cy, r = 1.0, 1.0, 0.5
+        ibm.add_circle_with_top_indent(
+            cx=cx,
+            cy=cy,
+            radius=r,
+            indent_width=0.3,
+            indent_depth=0.2,
+        )
+
+        i_center = int(np.argmin(np.abs(g.xf - cx)))
+        j_notch = int(np.argmin(np.abs(g.yc - (cy + r - 0.1))))
+        j_body = int(np.argmin(np.abs(g.yc - cy)))
+
+        assert not ibm.mask_u[i_center, j_notch]
+        assert ibm.mask_u[i_center, j_body]
+
+    def test_invalid_indent_rejected(self):
+        g = CartesianGrid(20, 20, lx=2.0, ly=2.0)
+        ibm = ImmersedBoundary(g)
+        with pytest.raises(ValueError):
+            ibm.add_circle_with_top_indent(
+                cx=1.0,
+                cy=1.0,
+                radius=0.3,
+                indent_width=0.7,
+                indent_depth=0.1,
+            )
+
+
+class TestIBMSweepingJet:
+    def test_sweeping_jet_imposes_outlet_velocity(self):
+        g = CartesianGrid(80, 80, lx=2.0, ly=2.0)
+        ibm = ImmersedBoundary(g)
+        ibm.add_sweeping_jet_circle(
+            cx=1.0,
+            cy=1.0,
+            radius=0.5,
+            jet_speed=0.4,
+            slot_center_angle_deg=90.0,
+            slot_width_angle_deg=20.0,
+            slot_depth=0.08,
+            sweep_amplitude_deg=0.0,
+            frequency=0.0,
+        )
+
+        u = np.zeros(g.u_shape)
+        v = np.zeros(g.v_shape)
+        ibm.apply(u, v, time=0.0)
+
+        spec = ibm.sweeping_jets[0]
+        assert np.any(spec.mask_u)
+        assert np.any(spec.mask_v)
+        assert np.all(v[spec.mask_v] >= 0.0)
+        assert np.any(v[spec.mask_v] > 0.0)
+
+        body_only_v = ibm.mask_v & ~spec.mask_v
+        assert np.allclose(v[body_only_v], 0.0)
+
+    def test_geometry_resolved_jet_cavity_is_fluid(self):
+        g = CartesianGrid(100, 100, lx=2.0, ly=2.0)
+        ibm = ImmersedBoundary(g)
+        ibm.add_geometry_resolved_sweeping_jet_circle(
+            cx=1.0,
+            cy=1.0,
+            radius=0.5,
+            jet_speed=0.4,
+            cavity_width=0.4,
+            cavity_height=0.3,
+            slot_width=0.12,
+            slot_height=0.08,
+            feed_width=0.18,
+            feed_height=0.08,
+            sweep_amplitude_deg=0.0,
+            frequency=0.0,
+        )
+
+        i_c = int(np.argmin(np.abs(g.xf - 1.0)))
+        j_cavity = int(np.argmin(np.abs(g.yc - 1.28)))
+        j_body = int(np.argmin(np.abs(g.yc - 1.0)))
+        assert not ibm.mask_u[i_c, j_cavity]
+        assert ibm.mask_u[i_c, j_body]
+        assert len(ibm.oscillating_jet_patches) == 1
+
+    def test_geometry_resolved_jet_rear_cavity_rotates_with_angle(self):
+        g = CartesianGrid(100, 100, lx=2.0, ly=2.0)
+        ibm = ImmersedBoundary(g)
+        ibm.add_geometry_resolved_sweeping_jet_circle(
+            cx=1.0,
+            cy=1.0,
+            radius=0.5,
+            jet_speed=0.4,
+            cavity_width=0.4,
+            cavity_height=0.3,
+            slot_width=0.12,
+            slot_height=0.08,
+            feed_width=0.18,
+            feed_height=0.08,
+            slot_center_angle_deg=180.0,
+            sweep_amplitude_deg=0.0,
+            frequency=0.0,
+        )
+
+        i_cavity = int(np.argmin(np.abs(g.xf - 0.72)))
+        j_cavity = int(np.argmin(np.abs(g.yc - 1.0)))
+        i_body = int(np.argmin(np.abs(g.xf - 1.0)))
+        assert not ibm.mask_u[i_cavity, j_cavity]
+        assert ibm.mask_u[i_body, j_cavity]
+        assert len(ibm.oscillating_jet_patches) == 1

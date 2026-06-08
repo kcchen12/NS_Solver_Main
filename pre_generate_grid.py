@@ -10,12 +10,6 @@ from src.grid import CartesianGrid, build_nonuniform_grid_metadata
 from src.io_utils import save_grid_metadata, save_grid_metadata_dict
 
 
-def _normalize_nonuniform_mode(raw_value: str | None) -> str:
-    value = "center-band" if raw_value is None else str(
-        raw_value).strip().lower()
-    return value if value in {"center-band", "center-uniform"} else "center-band"
-
-
 def parse_args() -> argparse.Namespace:
     script_dir = os.path.dirname(os.path.abspath(__file__))
     default_config = os.path.join(script_dir, "config.txt")
@@ -29,30 +23,14 @@ def parse_args() -> argparse.Namespace:
     cfg = ConfigParser(args_pre.config)
 
     # Unified grid controls from config.txt.
-    # Backward compatibility:
-    # 1) If uniform_grid is set, it overrides string grid type keys.
-    # 2) Otherwise grid_type can override legacy pre_grid_type.
-    # 3) grid_beta_x/y can override legacy pre betas.
     uniform_grid = cfg.get("uniform_grid", None, bool)
     if uniform_grid is None:
-        grid_type_default = cfg.get("grid_type", cfg.get(
-            "pre_grid_type", "uniform", str), str)
+        grid_type_default = cfg.get("grid_type", "uniform", str)
     else:
         grid_type_default = "uniform" if uniform_grid else "nonuniform"
 
-    beta_x_default = cfg.get("grid_beta_x", cfg.get(
-        "pre_nonuniform_beta_x", 2.0, float), float)
-    beta_y_default = cfg.get("grid_beta_y", cfg.get(
-        "pre_nonuniform_beta_y", 2.0, float), float)
-    nonuniform_mode_default = _normalize_nonuniform_mode(
-        cfg.get(
-            "grid_nonuniform_mode",
-            cfg.get("runtime_nonuniform_mode", "center-band", str),
-            str,
-        )
-    )
-    band_fraction_x_default = cfg.get("grid_band_fraction_x", 1.0 / 3.0, float)
-    band_fraction_y_default = cfg.get("grid_band_fraction_y", 1.0 / 3.0, float)
+    beta_x_default = cfg.get("grid_beta_x", 2.0, float)
+    beta_y_default = cfg.get("grid_beta_y", 2.0, float)
     uniform_x_start_default = cfg.get("grid_uniform_x_start", None, float)
     uniform_x_end_default = cfg.get("grid_uniform_x_end", None, float)
     uniform_y_start_default = cfg.get("grid_uniform_y_start", None, float)
@@ -98,59 +76,28 @@ def parse_args() -> argparse.Namespace:
         help="y-direction center-density boost for nonuniform grid (<=0 gives uniform spacing)",
     )
     p.add_argument(
-        "--nonuniform-mode",
-        type=str,
-        choices=["center-band", "center-uniform"],
-        default=nonuniform_mode_default,
-        help="Nonuniform-grid generation mode",
-    )
-    p.add_argument(
-        "--band-fraction-x",
-        type=float,
-        default=band_fraction_x_default,
-        help="Fraction of the x-domain width refined in the center-band mode",
-    )
-    p.add_argument(
-        "--band-fraction-y",
-        type=float,
-        default=band_fraction_y_default,
-        help="Fraction of the y-domain width refined in the center-band mode",
-    )
-    p.add_argument(
         "--uniform-x-start",
         type=float,
         default=uniform_x_start_default,
-        help="Absolute x-start of the uniform core for center-uniform mode",
+        help="Absolute x-start of the uniform core for nonuniform grids",
     )
     p.add_argument(
         "--uniform-x-end",
         type=float,
         default=uniform_x_end_default,
-        help="Absolute x-end of the uniform core for center-uniform mode",
+        help="Absolute x-end of the uniform core for nonuniform grids",
     )
     p.add_argument(
         "--uniform-y-start",
         type=float,
         default=uniform_y_start_default,
-        help="Absolute y-start of the uniform core for center-uniform mode (use -a)",
+        help="Absolute y-start of the uniform core for nonuniform grids (use -a)",
     )
     p.add_argument(
         "--uniform-y-end",
         type=float,
         default=uniform_y_end_default,
-        help="Absolute y-end of the uniform core for center-uniform mode (use +a)",
-    )
-    p.add_argument(
-        "--focus-x",
-        type=float,
-        default=cfg.get("cylinder_center_x", -1.0, float),
-        help="Center x-coordinate for the refined band (<0 uses domain midpoint)",
-    )
-    p.add_argument(
-        "--focus-y",
-        type=float,
-        default=cfg.get("cylinder_center_y", -1.0, float),
-        help="Center y-coordinate for the refined band (<0 uses domain midpoint)",
+        help="Absolute y-end of the uniform core for nonuniform grids (use +a)",
     )
     p.add_argument(
         "--output-name",
@@ -180,13 +127,14 @@ def parse_args() -> argparse.Namespace:
         p.error("Provide both --uniform-x-start and --uniform-x-end, or neither")
     if (args.uniform_y_start is None) != (args.uniform_y_end is None):
         p.error("Provide both --uniform-y-start and --uniform-y-end, or neither")
-    if args.nonuniform_mode == "center-uniform":
+    if args.grid_type == "nonuniform":
         if args.uniform_x_start is None or args.uniform_y_start is None:
             p.error(
-                "center-uniform mode requires explicit --uniform-x-* and --uniform-y-* bounds")
+                "nonuniform grids require explicit --uniform-x-* and --uniform-y-* bounds")
 
     args.lx = float(args.x_max - args.x_min)
     args.ly = float(args.y_max - args.y_min)
+    args.nonuniform_mode = "center-uniform"
     return args
 
 
@@ -211,8 +159,6 @@ if __name__ == "__main__":
             f"{display_path} for nx={grid.nx}, ny={grid.ny}, lx={grid.lx}, ly={grid.ly}"
         )
     else:
-        focus_x = args.focus_x if args.focus_x >= 0.0 else args.x_min + args.lx / 2.0
-        focus_y = args.focus_y if args.focus_y >= 0.0 else args.y_min + args.ly / 2.0
         metadata = build_nonuniform_grid_metadata(
             nx=args.nx,
             ny=args.ny,
@@ -222,11 +168,6 @@ if __name__ == "__main__":
             beta_y=args.beta_y,
             x_min=args.x_min,
             y_min=args.y_min,
-            focus_x=focus_x,
-            focus_y=focus_y,
-            band_fraction_x=args.band_fraction_x,
-            band_fraction_y=args.band_fraction_y,
-            nonuniform_mode=args.nonuniform_mode,
             uniform_x_start=args.uniform_x_start,
             uniform_x_end=args.uniform_x_end,
             uniform_y_start=args.uniform_y_start,
@@ -237,9 +178,7 @@ if __name__ == "__main__":
             "Saved nonuniform prepared grid metadata to "
             f"{display_path} for nx={args.nx}, ny={args.ny}, lx={args.lx}, ly={args.ly}, "
             f"beta_x={args.beta_x}, beta_y={args.beta_y}, "
-            f"mode={args.nonuniform_mode}, "
-            f"band_fraction_x={args.band_fraction_x}, band_fraction_y={args.band_fraction_y}, "
+            "mode=center-uniform, "
             f"uniform_x=[{args.uniform_x_start}, {args.uniform_x_end}], "
-            f"uniform_y=[{args.uniform_y_start}, {args.uniform_y_end}], "
-            f"center=({focus_x}, {focus_y})"
+            f"uniform_y=[{args.uniform_y_start}, {args.uniform_y_end}]"
         )

@@ -260,24 +260,6 @@ def stretched_faces_tanh(n: int, length: float, beta: float) -> np.ndarray:
     return length * s
 
 
-def _cluster_to_upper_end(n: int, length: float, beta: float) -> np.ndarray:
-    """Faces on [0, length] clustered near the upper end x=length."""
-    xi = np.linspace(0.0, 1.0, n + 1)
-    if beta <= 0.0:
-        return length * xi
-    s = np.tanh(beta * xi) / np.tanh(beta)
-    return length * s
-
-
-def _cluster_to_lower_end(n: int, length: float, beta: float) -> np.ndarray:
-    """Faces on [0, length] clustered near the lower end x=0."""
-    xi = np.linspace(0.0, 1.0, n + 1)
-    if beta <= 0.0:
-        return length * xi
-    s = 1.0 - (np.tanh(beta * (1.0 - xi)) / np.tanh(beta))
-    return length * s
-
-
 def _allocate_piecewise_cells(
     n: int,
     lengths: np.ndarray,
@@ -397,93 +379,6 @@ def _resolve_center_uniform_interval(
     return core_start, core_end
 
 
-def stretched_faces_center_band(
-    n: int,
-    length: float,
-    beta: float,
-    center: float | None = None,
-    band_fraction: float = 1.0 / 3.0,
-) -> tuple[np.ndarray, float, float]:
-    """Faces concentrated smoothly toward the middle of a central band.
-
-    Outside the band, the target point density stays near the uniform-grid
-    baseline. Inside the band, a raised-cosine boost increases density
-    smoothly toward the band center, so spacing decreases gently as you move
-    inward rather than collapsing at the band edges.
-    """
-    if n <= 0:
-        raise ValueError("n must be positive")
-    if length <= 0.0:
-        raise ValueError("length must be positive")
-
-    if beta <= 0.0:
-        return stretched_faces_tanh(n, length, beta=0.0), 0.0, length
-
-    frac = float(np.clip(band_fraction, 1e-3, 1.0))
-    band_width = frac * length
-    half_width = 0.5 * band_width
-    eps = 1e-12 * max(1.0, length)
-
-    center_default = 0.5 * length if center is None else float(center)
-    center_clamped = float(
-        np.clip(center_default, half_width + eps, length - half_width - eps))
-    band_start = max(0.0, center_clamped - half_width)
-    band_end = min(length, center_clamped + half_width)
-
-    segment_lengths = np.array(
-        [
-            band_start,
-            center_clamped - band_start,
-            band_end - center_clamped,
-            length - band_end,
-        ],
-        dtype=float,
-    )
-    center_weight = 1.0 + 0.25 * beta
-    segment_weights = np.array(
-        [1.0, center_weight, center_weight, 1.0], dtype=float
-    )
-    segment_counts = _allocate_piecewise_cells(
-        n, segment_lengths, segment_weights)
-
-    segments = []
-
-    left_outer_n = int(segment_counts[0])
-    if left_outer_n > 0:
-        segments.append(np.linspace(0.0, band_start, left_outer_n + 1))
-
-    left_inner_n = int(segment_counts[1])
-    if left_inner_n > 0:
-        segments.append(
-            band_start
-            + _cluster_to_upper_end(
-                left_inner_n, center_clamped - band_start, beta
-            )
-        )
-
-    right_inner_n = int(segment_counts[2])
-    if right_inner_n > 0:
-        segments.append(
-            center_clamped
-            + _cluster_to_lower_end(
-                right_inner_n, band_end - center_clamped, beta
-            )
-        )
-
-    right_outer_n = int(segment_counts[3])
-    if right_outer_n > 0:
-        segments.append(np.linspace(band_end, length, right_outer_n + 1))
-
-    if segments:
-        faces = np.concatenate([segments[0]] + [segment[1:]
-                               for segment in segments[1:]])
-    else:
-        faces = np.linspace(0.0, length, n + 1)
-    faces[0] = 0.0
-    faces[-1] = length
-    return faces, band_start, band_end
-
-
 def stretched_faces_center_uniform(
     n: int,
     length: float,
@@ -571,11 +466,6 @@ def build_nonuniform_grid_metadata(
     beta_y: float,
     x_min: float = 0.0,
     y_min: float = 0.0,
-    focus_x: float | None = None,
-    focus_y: float | None = None,
-    band_fraction_x: float = 1.0 / 3.0,
-    band_fraction_y: float = 1.0 / 3.0,
-    nonuniform_mode: str = "center-band",
     uniform_x_start: float | None = None,
     uniform_x_end: float | None = None,
     uniform_y_start: float | None = None,
@@ -583,98 +473,80 @@ def build_nonuniform_grid_metadata(
 ) -> dict:
     """Build serializable metadata for a 2-D non-uniform Cartesian grid.
 
-    Supported modes:
-    - center-band: increased density inside a central rectangular band
-    - center-uniform: constant spacing in a central rectangular core with
-      stretched outer regions toward the boundaries
+    The nonuniform grid uses a constant-spacing central core with stretched
+    outer regions toward the boundaries.
     """
-    mode = str(nonuniform_mode).strip().lower()
-    center_x = x_min + 0.5 * lx if focus_x is None else float(focus_x)
-    center_y = y_min + 0.5 * ly if focus_y is None else float(focus_y)
     x_max = float(x_min + lx)
     y_max = float(y_min + ly)
-    center_local_x = center_x - float(x_min)
-    center_local_y = center_y - float(y_min)
+    if uniform_x_start is None or uniform_x_end is None:
+        raise ValueError(
+            "Nonuniform grid generation requires uniform_x_start and uniform_x_end"
+        )
+    x_interval = (
+        float(uniform_x_start) - float(x_min),
+        float(uniform_x_end) - float(x_min),
+    )
+    xf, band_start_x, band_end_x = stretched_faces_center_uniform(
+        nx,
+        lx,
+        beta_x,
+        core_interval=x_interval,
+    )
 
-    if mode == "center-band":
-        xf, band_start_x, band_end_x = stretched_faces_center_band(
-            nx, lx, beta_x, center=center_local_x, band_fraction=band_fraction_x
-        )
-        yf, band_start_y, band_end_y = stretched_faces_center_band(
-            ny, ly, beta_y, center=center_local_y, band_fraction=band_fraction_y
-        )
-    elif mode == "center-uniform":
-        if uniform_x_start is None or uniform_x_end is None:
+    mirrored_y = y_min < 0.0 < y_max
+    if mirrored_y:
+        if not np.isclose(y_min + y_max, 0.0, atol=1e-10, rtol=0.0):
             raise ValueError(
-                "center-uniform mode requires uniform_x_start and uniform_x_end"
+                "center-uniform mirrored y-spacing requires y-domain symmetric about 0"
             )
-        x_interval = (
-            float(uniform_x_start) - float(x_min),
-            float(uniform_x_end) - float(x_min),
+        if ny % 2 != 0:
+            raise ValueError(
+                "center-uniform mirrored y-spacing requires even ny"
+            )
+
+        if uniform_y_start is None or uniform_y_end is None:
+            raise ValueError(
+                "Nonuniform grid generation requires uniform_y_start and uniform_y_end"
+            )
+        y0 = float(uniform_y_start)
+        y1 = float(uniform_y_end)
+        if not (y0 < 0.0 < y1 and np.isclose(abs(y0), abs(y1), atol=1e-10, rtol=0.0)):
+            raise ValueError(
+                "uniform_y_start/uniform_y_end must be symmetric around 0 (e.g. -a, a)"
+            )
+        y_core_interval = (0.0, abs(y1))
+
+        upper_faces, y_core_start_local, y_core_end_local = stretched_faces_center_uniform(
+            ny // 2,
+            y_max,
+            beta_y,
+            core_interval=y_core_interval,
         )
-        xf, band_start_x, band_end_x = stretched_faces_center_uniform(
-            nx,
-            lx,
-            beta_x,
-            core_interval=x_interval,
-        )
-
-        mirrored_y = y_min < 0.0 < y_max
-        if mirrored_y:
-            if not np.isclose(y_min + y_max, 0.0, atol=1e-10, rtol=0.0):
-                raise ValueError(
-                    "center-uniform mirrored y-spacing requires y-domain symmetric about 0"
-                )
-            if ny % 2 != 0:
-                raise ValueError(
-                    "center-uniform mirrored y-spacing requires even ny"
-                )
-
-            if uniform_y_start is None or uniform_y_end is None:
-                raise ValueError(
-                    "center-uniform mode requires uniform_y_start and uniform_y_end"
-                )
-            y0 = float(uniform_y_start)
-            y1 = float(uniform_y_end)
-            if not (y0 < 0.0 < y1 and np.isclose(abs(y0), abs(y1), atol=1e-10, rtol=0.0)):
-                raise ValueError(
-                    "uniform_y_start/uniform_y_end must be symmetric around 0 (e.g. -a, a)"
-                )
-            y_core_interval = (0.0, abs(y1))
-
-            upper_faces, y_core_start_local, y_core_end_local = stretched_faces_center_uniform(
-                ny // 2,
-                y_max,
-                beta_y,
-                core_interval=y_core_interval,
-            )
-            yf = np.concatenate((-upper_faces[::-1], upper_faces[1:]))
-            band_start_y = -y_core_end_local
-            band_end_y = y_core_end_local
-        else:
-            if uniform_y_start is None or uniform_y_end is None:
-                raise ValueError(
-                    "center-uniform mode requires uniform_y_start and uniform_y_end"
-                )
-            y_interval = (
-                float(uniform_y_start) - float(y_min),
-                float(uniform_y_end) - float(y_min),
-            )
-            yf, band_start_y, band_end_y = stretched_faces_center_uniform(
-                ny,
-                ly,
-                beta_y,
-                core_interval=y_interval,
-            )
+        yf = np.concatenate((-upper_faces[::-1], upper_faces[1:]))
+        band_start_y = -y_core_end_local
+        band_end_y = y_core_end_local
     else:
-        raise ValueError(f"Unsupported nonuniform_mode '{nonuniform_mode}'")
+        if uniform_y_start is None or uniform_y_end is None:
+            raise ValueError(
+                "Nonuniform grid generation requires uniform_y_start and uniform_y_end"
+            )
+        y_interval = (
+            float(uniform_y_start) - float(y_min),
+            float(uniform_y_end) - float(y_min),
+        )
+        yf, band_start_y, band_end_y = stretched_faces_center_uniform(
+            ny,
+            ly,
+            beta_y,
+            core_interval=y_interval,
+        )
 
     xf = xf + float(x_min)
-    if mode != "center-uniform" or not (y_min < 0.0 < y_max):
+    if not mirrored_y:
         yf = yf + float(y_min)
     band_start_x += float(x_min)
     band_end_x += float(x_min)
-    if mode != "center-uniform" or not (y_min < 0.0 < y_max):
+    if not mirrored_y:
         band_start_y += float(y_min)
         band_end_y += float(y_min)
 
@@ -684,11 +556,7 @@ def build_nonuniform_grid_metadata(
     metadata["grid_type"] = "nonuniform"
     metadata["beta_x"] = float(beta_x)
     metadata["beta_y"] = float(beta_y)
-    metadata["nonuniform_mode"] = mode
-    metadata["focus_x"] = float(center_x)
-    metadata["focus_y"] = float(center_y)
-    metadata["band_fraction_x"] = float(band_fraction_x)
-    metadata["band_fraction_y"] = float(band_fraction_y)
+    metadata["nonuniform_mode"] = "center-uniform"
     metadata["uniform_x_start"] = np.nan if uniform_x_start is None else float(
         uniform_x_start)
     metadata["uniform_x_end"] = np.nan if uniform_x_end is None else float(

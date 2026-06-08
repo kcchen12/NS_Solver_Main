@@ -2,15 +2,18 @@
 # Controls optional generated artifacts after a run.
 
 # Grid visualization
-plot_grid = true
-auto_generate_grid_spacing = true
-auto_generate_ibm_forcing = true
-auto_generate_vorticity_video = true
+plot = true
+auto_generate_grid_spacing = false
+auto_generate_ibm_forcing = false
+auto_generate_vorticity_video = on
 auto_vorticity_video_frame_stride = 5
 
 # Aerodynamic outputs
 auto_generate_coeff_history = true
 auto_generate_aero_report = true
+auto_generate_shedding_spectrum = true
+auto_generate_pressure_coefficient_theta = true
+auto_generate_time_averaged_fields = true
 
 # Time trimming for post-processing
 auto_coeff_t_min = 0.5

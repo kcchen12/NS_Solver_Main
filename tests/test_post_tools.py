@@ -1,11 +1,16 @@
 """Tests for post-processing helper scripts."""
 
+import os
 import numpy as np
 
-from analyze_aerodynamics import _read_config
+from analyze_aerodynamics import _read_config, plot_shedding_spectrum, save_pressure_coefficient_report
+from time_average_snapshots import compute_time_averaged_fields, save_time_averaged_fields
+from time_average_snapshots import plot_time_averaged_fields
 from view_snapshot_viewer import (
+    _load_cylinder_overlay_geometry_for_snapshot,
     _compute_snapshot_vorticity,
     pick_slice_and_component,
+    plot_snapshot_key,
     plot_vorticity_video,
 )
 
@@ -25,6 +30,124 @@ class TestAnalyzeAerodynamicsHelpers:
         assert config["cylinder_radius"] == 0.25
         assert config["re"] == 100.0
         assert "note" not in config
+
+    def test_plot_shedding_spectrum_writes_png(self, tmp_path):
+        results_dir = tmp_path / "results"
+        results_dir.mkdir()
+        old_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            t = np.linspace(0.0, 20.0, 400, endpoint=False)
+            c_l = np.sin(2.0 * np.pi * 0.4 * t) + 0.2 * np.sin(2.0 * np.pi * 0.8 * t)
+            c_d = np.zeros_like(c_l)
+            arr = np.column_stack((t, c_d, c_l))
+            csv_path = tmp_path / "aero.csv"
+            np.savetxt(csv_path, arr, delimiter=",", header="t,c_d,c_l", comments="")
+
+            plot_shedding_spectrum(
+                str(csv_path),
+                save_name="test_shedding_spectrum.png",
+                t_min=0.0,
+                f_min=0.1,
+                f_max=1.5,
+                char_length=1.0,
+                u_ref=1.0,
+            )
+
+            assert (results_dir / "test_shedding_spectrum.png").exists()
+        finally:
+            os.chdir(old_cwd)
+
+    def test_save_pressure_coefficient_report_writes_csv_and_png(self, tmp_path):
+        outdir = tmp_path / "output"
+        outdir.mkdir()
+        results_dir = tmp_path / "results"
+        results_dir.mkdir()
+
+        nx = ny = 64
+        xf = np.linspace(0.0, 1.0, nx + 1)
+        yf = np.linspace(0.0, 1.0, ny + 1)
+        xc = 0.5 * (xf[:-1] + xf[1:])
+        yc = 0.5 * (yf[:-1] + yf[1:])
+        p = np.broadcast_to(xc[:, np.newaxis], (nx, ny)).copy()
+
+        np.savez(outdir / "uniform_grid.npz", xf=xf, yf=yf)
+        snap_path = outdir / "snap_000.0000.npz"
+        np.savez(snap_path, p=p, t=0.0)
+
+        old_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            save_pressure_coefficient_report(
+                str(snap_path),
+                u_ref=1.0,
+                save_csv="test_cp_theta.csv",
+                save_plot="test_cp_theta.png",
+                cylinder_center=(0.5, 0.5),
+                cylinder_radius=0.25,
+                n_samples=180,
+            )
+            csv_path = results_dir / "test_cp_theta.csv"
+            png_path = results_dir / "test_cp_theta.png"
+            assert csv_path.exists()
+            assert png_path.exists()
+
+            data = np.genfromtxt(csv_path, delimiter=",", names=True)
+            theta_deg = np.atleast_1d(data["theta_deg"]).astype(float)
+            c_p = np.atleast_1d(data["c_p_zero_mean_surface"]).astype(float)
+            idx0 = int(np.argmin(np.abs(theta_deg - 0.0)))
+            idx180 = int(np.argmin(np.abs(theta_deg - 180.0)))
+            assert c_p[idx0] > 0.0
+            assert c_p[idx180] < 0.0
+        finally:
+            os.chdir(old_cwd)
+
+    def test_time_average_snapshots_computes_mean_and_rms(self, tmp_path):
+        outdir = tmp_path / "output"
+        outdir.mkdir()
+        results_dir = tmp_path / "results"
+        results_dir.mkdir()
+
+        xf = np.array([0.0, 1.0, 2.0], dtype=float)
+        yf = np.array([0.0, 1.0, 2.0], dtype=float)
+        np.savez(outdir / "uniform_grid.npz", xf=xf, yf=yf)
+
+        p0 = np.full((2, 2), 10.0, dtype=float)
+        p1 = np.full((2, 2), 14.0, dtype=float)
+
+        u0 = np.full((3, 2), 1.0, dtype=float)
+        u1 = np.full((3, 2), 3.0, dtype=float)
+        v0 = np.full((2, 3), 2.0, dtype=float)
+        v1 = np.full((2, 3), 6.0, dtype=float)
+
+        np.savez(outdir / "snap_000.0000.npz", u=u0, v=v0, p=p0, t=0.0)
+        np.savez(outdir / "snap_001.0000.npz", u=u1, v=v1, p=p1, t=1.0)
+
+        stats = compute_time_averaged_fields(indir=str(outdir), t_min=0.0)
+        assert np.allclose(stats["u_mean"], 2.0)
+        assert np.allclose(stats["v_mean"], 4.0)
+        assert np.allclose(stats["p_mean"], 12.0)
+        assert np.allclose(stats["u_rms"], 1.0)
+        assert np.allclose(stats["v_rms"], 2.0)
+        assert np.allclose(stats["xc"], np.array([0.5, 1.5]))
+        assert np.allclose(stats["yc"], np.array([0.5, 1.5]))
+        assert stats["n_snapshots"] == 2
+
+        save_path = save_time_averaged_fields(
+            indir=str(outdir),
+            results_dir=str(results_dir),
+            save_name="test_time_avg.npz",
+        )
+        assert os.path.exists(save_path)
+
+        plot_path = plot_time_averaged_fields(
+            save_path,
+            save_name="test_time_avg.png",
+            results_dir=str(results_dir),
+            x_scale=1.5,
+            y_scale=0.75,
+        )
+        assert os.path.exists(plot_path)
 
 
 class TestSnapshotViewerHelpers:
@@ -52,6 +175,64 @@ class TestSnapshotViewerHelpers:
         assert yc.shape == (ny,)
         assert omega.shape == (nx, ny)
         assert np.allclose(omega, 0.0)
+
+    def test_plot_snapshot_key_accepts_independent_axis_scales(self, tmp_path):
+        outdir = tmp_path / "output"
+        outdir.mkdir()
+        results_dir = tmp_path / "results"
+        results_dir.mkdir()
+
+        snap_path = outdir / "snap_000.0000.npz"
+        np.savez(snap_path, p=np.arange(12, dtype=float).reshape(3, 4), t=0.0)
+
+        old_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            plot_snapshot_key(
+                str(snap_path),
+                "p",
+                save_name="scaled_pressure.png",
+                x_scale=1.8,
+                y_scale=0.6,
+            )
+            assert (results_dir / "scaled_pressure.png").exists()
+        finally:
+            os.chdir(old_cwd)
+
+    def test_cylinder_overlay_prefers_snapshot_metadata(self, tmp_path):
+        outdir = tmp_path / "output"
+        outdir.mkdir()
+        config_path = tmp_path / "config.txt"
+        config_path.write_text(
+            "cylinder = true\n"
+            "lx = 10.0\n"
+            "ly = 10.0\n"
+            "cylinder_center_x = 9.0\n"
+            "cylinder_center_y = 9.0\n"
+            "cylinder_radius = 1.0\n",
+            encoding="utf-8",
+        )
+
+        nx, ny = 4, 3
+        u = np.ones((nx + 1, ny), dtype=float)
+        v = np.zeros((nx, ny + 1), dtype=float)
+        snap_path = outdir / "snap_000.0000.npz"
+        np.savez(
+            snap_path,
+            u=u,
+            v=v,
+            t=0.0,
+            meta_cylinder_enabled=np.array(True),
+            meta_cylinder_center_x=np.array(0.0),
+            meta_cylinder_center_y=np.array(0.0),
+            meta_cylinder_radius=np.array(0.5),
+        )
+
+        geom = _load_cylinder_overlay_geometry_for_snapshot(
+            str(snap_path),
+            config_path=str(config_path),
+        )
+        assert geom == (0.0, 0.0, 0.5)
 
     def test_plot_vorticity_video_writes_gif(self, tmp_path):
         outdir = tmp_path / "output"
