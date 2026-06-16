@@ -14,5 +14,5 @@ Project notes, examples, and supporting references live here.
 ## Usage Notes
 
 - The recommended runtime config fields are the unified keys used by `main.py` and `pre_generate_grid.py`, such as `uniform_grid`, `grid_beta_x`, `grid_beta_y`, `grid_uniform_x_start`, and `grid_uniform_y_start`
-- Experimental cylinder and jet-actuator controls live in `experimental_config.txt`
+- Experimental cylinder controls live in `experimental_config.txt`
 - Post-run plotting and reporting controls live in `post_config.txt`, not in the main runtime config

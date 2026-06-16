@@ -491,6 +491,7 @@ def plot_vorticity_video(
     verbose: bool = False,
     results_dir: str = DEFAULT_RESULTS_DIR,
     config_path: str = "config.txt",
+    draw_cylinder_overlay: bool = True,
 ) -> None:
     """Create an animated GIF of vorticity over all saved snapshots."""
     if save_name:
@@ -570,10 +571,12 @@ def plot_vorticity_video(
     ax.set_aspect("equal")
     ax.set_xlim(-5.0, 15.0)
     ax.set_ylim(-5.0, 5.0)
-    circle_geometry = _load_cylinder_overlay_geometry_for_snapshot(
-        paths[0],
-        config_path=config_path,
-    )
+    circle_geometry = None
+    if draw_cylinder_overlay:
+        circle_geometry = _load_cylinder_overlay_geometry_for_snapshot(
+            paths[0],
+            config_path=config_path,
+        )
     if circle_geometry is not None:
         cx, cy, radius = circle_geometry
         ax.add_patch(
@@ -769,6 +772,9 @@ def main(argv=None):
                         help="frames per second for the animated vorticity GIF")
     parser.add_argument("--video-frame-stride", type=int, default=1,
                         help="use every nth snapshot when building the vorticity GIF")
+    parser.add_argument("--draw-cylinder-overlay", action=argparse.BooleanOptionalAction,
+                        default=True,
+                        help="draw the cylinder/body outline on vorticity videos")
     parser.add_argument("--x-scale", type=float, default=1.0,
                         help="horizontal display scale for saved field plots")
     parser.add_argument("--y-scale", type=float, default=1.0,
@@ -829,6 +835,7 @@ def main(argv=None):
                 frame_stride=args.video_frame_stride,
                 verbose=args.verbose,
                 config_path=args.config,
+                draw_cylinder_overlay=args.draw_cylinder_overlay,
             )
         except Exception as e:
             print(f"Error creating vorticity video: {e}", file=sys.stderr)

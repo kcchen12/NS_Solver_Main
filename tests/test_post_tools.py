@@ -3,6 +3,7 @@
 import os
 import numpy as np
 
+import view_snapshot_viewer
 from analyze_aerodynamics import _read_config, plot_shedding_spectrum, save_pressure_coefficient_report
 from time_average_snapshots import compute_time_averaged_fields, save_time_averaged_fields
 from time_average_snapshots import plot_time_averaged_fields
@@ -279,3 +280,33 @@ class TestSnapshotViewerHelpers:
         )
 
         assert (results_dir / "test_vorticity_stride.gif").exists()
+
+    def test_plot_vorticity_video_can_disable_cylinder_overlay(self, tmp_path, monkeypatch):
+        outdir = tmp_path / "output"
+        outdir.mkdir()
+        results_dir = tmp_path / "results"
+
+        nx, ny = 4, 3
+        u = np.ones((nx + 1, ny), dtype=float)
+        v = np.zeros((nx, ny + 1), dtype=float)
+        np.savez(outdir / "snap_000.0000.npz", u=u, v=v, t=0.0)
+        np.savez(outdir / "snap_000.1000.npz", u=u, v=v, t=0.1)
+
+        def fail_overlay_load(*args, **kwargs):
+            raise AssertionError("overlay geometry should not be loaded")
+
+        monkeypatch.setattr(
+            view_snapshot_viewer,
+            "_load_cylinder_overlay_geometry_for_snapshot",
+            fail_overlay_load,
+        )
+
+        plot_vorticity_video(
+            snapshot_dir=str(outdir),
+            save_name="test_vorticity_no_overlay.gif",
+            fps=2,
+            results_dir=str(results_dir),
+            draw_cylinder_overlay=False,
+        )
+
+        assert (results_dir / "test_vorticity_no_overlay.gif").exists()

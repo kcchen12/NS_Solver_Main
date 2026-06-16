@@ -18,7 +18,7 @@ Additional notes live in [docs/README.md](docs/README.md).
 
 - [main.py](/Users/Carolyn/Desktop/NS_Solver_Claude/main.py): main solver entry point
 - [config.txt](/Users/Carolyn/Desktop/NS_Solver_Claude/config.txt): run configuration
-- [experimental_config.txt](/Users/Carolyn/Desktop/NS_Solver_Claude/experimental_config.txt): experimental cylinder and jet-actuator configuration
+- [experimental_config.txt](/Users/Carolyn/Desktop/NS_Solver_Claude/experimental_config.txt): experimental cylinder configuration
 - [post_config.txt](/Users/Carolyn/Desktop/NS_Solver_Claude/post_config.txt): post-processing configuration
 - [pre_generate_grid.py](/Users/Carolyn/Desktop/NS_Solver_Claude/pre_generate_grid.py): standalone prepared-grid generator
 - [analyze_aerodynamics.py](/Users/Carolyn/Desktop/NS_Solver_Claude/analyze_aerodynamics.py): aerodynamic coefficient and Strouhal-style analysis
@@ -65,7 +65,7 @@ Requirements:
 The project now uses three config files on purpose:
 
 - [config.txt](/Users/Carolyn/Desktop/NS_Solver_Claude/config.txt): how the simulation runs
-- [experimental_config.txt](/Users/Carolyn/Desktop/NS_Solver_Claude/experimental_config.txt): optional experimental cylinder / jet-actuator controls
+- [experimental_config.txt](/Users/Carolyn/Desktop/NS_Solver_Claude/experimental_config.txt): optional experimental cylinder controls
 - [post_config.txt](/Users/Carolyn/Desktop/NS_Solver_Claude/post_config.txt): which derived plots/reports get generated after the run
 
 Examples are provided in [config_example.txt](/Users/Carolyn/Desktop/NS_Solver_Claude/docs/examples/config_example.txt), [experimental_config_example.txt](/Users/Carolyn/Desktop/NS_Solver_Claude/docs/examples/experimental_config_example.txt), and [post_config_example.txt](/Users/Carolyn/Desktop/NS_Solver_Claude/docs/examples/post_config_example.txt).
@@ -125,22 +125,6 @@ Initialization and runtime:
 - `cylinder_experiment`
 - `cylinder_geometry_mode`, `ibm_shape`
 - `cylinder_indent_width`, `cylinder_indent_depth`
-- `cylinder_actuation_mode`
-- `sweeping_jet_velocity_ratio`
-- `sweeping_jet_frequency`
-- `sweeping_jet_center_deg`
-- `sweeping_jet_slot_width_deg`
-- `sweeping_jet_slot_depth`
-- `sweeping_jet_angle_deg`
-- `sweeping_jet_phase_deg`
-- `resolved_jet_cavity_width`, `resolved_jet_cavity_height`
-- `resolved_jet_slot_width`, `resolved_jet_slot_height`
-- `resolved_jet_feed_width`, `resolved_jet_feed_height`
-- `resolved_jet_nozzle_length`
-- `resolved_jet_slot_exit_width`
-- `resolved_jet_island_wall_gap`, `resolved_jet_island_center_gap`
-- `resolved_jet_island_leading_gap`, `resolved_jet_island_trailing_gap`
-- `resolved_jet_island_taper`
 
 ### Post Config
 
@@ -155,6 +139,7 @@ Initialization and runtime:
 - `auto_generate_ibm_forcing`: automatically generate `results/ibm_forcing.png` from the latest snapshot
 - `auto_generate_vorticity_video`: automatically generate `results/vorticity.gif` from all saved snapshots
 - `auto_vorticity_video_frame_stride`: use every `n`th snapshot when building the vorticity GIF
+- `draw_cylinder_overlay`: draw the cylinder/body outline on generated flow plots and GIFs
 - `auto_coeff_t_min`: minimum time for automatic coefficient-history plotting
 - `auto_aero_t_min`: minimum time for automatic aerodynamic analysis
 
@@ -343,4 +328,3 @@ Useful viewer options:
 
 - The README now reflects the current split-config workflow
 - There is no `evaluate_strouhal.py` in this repo; use [analyze_aerodynamics.py](/Users/Carolyn/Desktop/NS_Solver_Claude/analyze_aerodynamics.py) for current frequency/report analysis
-- The local Python environment on this machine currently appears broken, so documentation changes were updated against the code but not executed end-to-end from this shell

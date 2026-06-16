@@ -7,6 +7,7 @@ auto_generate_grid_spacing = false
 auto_generate_ibm_forcing = false
 auto_generate_vorticity_video = on
 auto_vorticity_video_frame_stride = 5
+draw_cylinder_overlay = true
 
 # Aerodynamic outputs
 auto_generate_coeff_history = true

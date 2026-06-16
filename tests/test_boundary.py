@@ -62,7 +62,7 @@ class TestWallBC:
 
 
 class TestConvectiveOutflow:
-    def test_outflow_zero_gradient_fallback(self):
+    def test_outflow_without_dt_uses_zero_gradient(self):
         """Without dt, outflow uses zero-gradient extrapolation."""
         g = make_grid()
         bc = BoundaryConfig(left=BCType.INFLOW, right=BCType.OUTFLOW,

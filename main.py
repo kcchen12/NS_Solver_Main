@@ -140,38 +140,15 @@ def _normalize_cylinder_geometry_mode(raw_value: str | None) -> str:
     return _normalize_ibm_shape(aliases.get(value, value))
 
 
-def _normalize_cylinder_actuation_mode(raw_value: str | None) -> str:
-    value = "none" if raw_value is None else str(raw_value).strip().lower()
-    aliases = {
-        "off": "none",
-        "sweeping_jet": "sweeping-jet",
-        "jet": "sweeping-jet",
-        "geometry_resolved_sweeping_jet": "geometry-resolved-sweeping-jet",
-        "resolved-jet": "geometry-resolved-sweeping-jet",
-    }
-    value = aliases.get(value, value)
-    return value if value in {"none", "sweeping-jet", "geometry-resolved-sweeping-jet"} else "none"
-
-
 def _normalize_cylinder_experiment_mode(raw_value: str | None) -> str:
     value = "none" if raw_value is None else str(raw_value).strip().lower()
     aliases = {
         "off": "none",
         "indent": "top-indent",
         "rectangular-indent": "top-indent",
-        "simulated-jet": "simulated-sweeping-jet",
-        "simulated_sweeping_jet": "simulated-sweeping-jet",
-        "geometry-resolved-jet": "geometry-resolved-sweeping-jet",
-        "geometry_resolved_sweeping_jet": "geometry-resolved-sweeping-jet",
     }
     value = aliases.get(value, value)
-    valid = {
-        "none",
-        "top-indent",
-        "simulated-sweeping-jet",
-        "geometry-resolved-sweeping-jet",
-    }
-    return value if value in valid else "none"
+    return value if value in {"none", "top-indent"} else "none"
 
 
 def parse_args():
@@ -294,8 +271,6 @@ def parse_args():
                    choices=[
                        "none",
                        "top-indent",
-                       "simulated-sweeping-jet",
-                       "geometry-resolved-sweeping-jet",
                    ],
                    default=_normalize_cylinder_experiment_mode(
                        exp_cfg.get("cylinder_experiment", "none", str)),
@@ -324,75 +299,6 @@ def parse_args():
     p.add_argument("--cylinder-indent-depth", type=float,
                    default=exp_cfg.get("cylinder_indent_depth", 0.0, float),
                    help="Depth of the rectangular top indent for circle-with-top-indent")
-    p.add_argument("--cylinder-actuation-mode", type=str,
-                   choices=["none", "sweeping-jet", "geometry-resolved-sweeping-jet"],
-                   default=_normalize_cylinder_actuation_mode(
-                       exp_cfg.get(
-                           "cylinder_actuation_mode",
-                           exp_cfg.get("actuator_model", "none", str),
-                           str,
-                       )),
-                   help="Optional finite jet actuation model on the cylinder surface")
-    p.add_argument("--sweeping-jet-velocity-ratio", type=float,
-                   default=exp_cfg.get("sweeping_jet_velocity_ratio", 0.25, float),
-                   help="Jet speed magnitude relative to inflow_u")
-    p.add_argument("--sweeping-jet-frequency", type=float,
-                   default=exp_cfg.get("sweeping_jet_frequency", -1.0, float),
-                   help="Jet sweep frequency; <=0 uses a shedding-scale default")
-    p.add_argument("--sweeping-jet-center-deg", type=float,
-                   default=exp_cfg.get("sweeping_jet_center_deg", 90.0, float),
-                   help="Angular location of the jet outlet on the cylinder surface")
-    p.add_argument("--sweeping-jet-slot-width-deg", type=float,
-                   default=exp_cfg.get("sweeping_jet_slot_width_deg", 18.0, float),
-                   help="Angular width of the finite jet outlet")
-    p.add_argument("--sweeping-jet-slot-depth", type=float,
-                   default=exp_cfg.get("sweeping_jet_slot_depth", 0.0, float),
-                   help="Radial depth of the finite jet outlet band inside the IBM body")
-    p.add_argument("--sweeping-jet-angle-deg", type=float,
-                   default=exp_cfg.get("sweeping_jet_angle_deg", 25.0, float),
-                   help="Sweep amplitude of the jet direction relative to the local normal")
-    p.add_argument("--sweeping-jet-phase-deg", type=float,
-                   default=exp_cfg.get("sweeping_jet_phase_deg", 0.0, float),
-                   help="Phase offset for the sweeping jet direction oscillation")
-    p.add_argument("--resolved-jet-cavity-width", type=float,
-                   default=exp_cfg.get("resolved_jet_cavity_width", 0.0, float),
-                   help="Width of the internal plenum for geometry-resolved jet mode")
-    p.add_argument("--resolved-jet-cavity-height", type=float,
-                   default=exp_cfg.get("resolved_jet_cavity_height", 0.0, float),
-                   help="Height of the internal plenum for geometry-resolved jet mode")
-    p.add_argument("--resolved-jet-slot-width", type=float,
-                   default=exp_cfg.get("resolved_jet_slot_width", 0.0, float),
-                   help="Width of the exit slot for geometry-resolved jet mode")
-    p.add_argument("--resolved-jet-slot-height", type=float,
-                   default=exp_cfg.get("resolved_jet_slot_height", 0.0, float),
-                   help="Height of the exit slot for geometry-resolved jet mode")
-    p.add_argument("--resolved-jet-feed-width", type=float,
-                   default=exp_cfg.get("resolved_jet_feed_width", 0.0, float),
-                   help="Width of the internal forcing/feed patch for geometry-resolved jet mode")
-    p.add_argument("--resolved-jet-feed-height", type=float,
-                   default=exp_cfg.get("resolved_jet_feed_height", 0.0, float),
-                   help="Height of the internal forcing/feed patch for geometry-resolved jet mode")
-    p.add_argument("--resolved-jet-nozzle-length", type=float,
-                   default=exp_cfg.get("resolved_jet_nozzle_length", 0.0, float),
-                   help="Length of the tapered nozzle section between plenum and slot")
-    p.add_argument("--resolved-jet-slot-exit-width", type=float,
-                   default=exp_cfg.get("resolved_jet_slot_exit_width", 0.0, float),
-                   help="Width of the internal exit wedge where the slot meets the cylinder wall")
-    p.add_argument("--resolved-jet-island-wall-gap", type=float,
-                   default=exp_cfg.get("resolved_jet_island_wall_gap", 0.0, float),
-                   help="Gap between each floating island and the outer plenum wall")
-    p.add_argument("--resolved-jet-island-center-gap", type=float,
-                   default=exp_cfg.get("resolved_jet_island_center_gap", 0.0, float),
-                   help="Gap between the two floating islands across the center channel")
-    p.add_argument("--resolved-jet-island-leading-gap", type=float,
-                   default=exp_cfg.get("resolved_jet_island_leading_gap", 0.0, float),
-                   help="Gap from the back of the plenum to the start of each floating island")
-    p.add_argument("--resolved-jet-island-trailing-gap", type=float,
-                   default=exp_cfg.get("resolved_jet_island_trailing_gap", 0.0, float),
-                   help="Gap from the front of each floating island to the nozzle throat")
-    p.add_argument("--resolved-jet-island-taper", type=float,
-                   default=exp_cfg.get("resolved_jet_island_taper", 0.0, float),
-                   help="Taper amount applied to the front face of each floating island")
     p.add_argument("--re-is-cylinder-based", type=str_to_bool,
                    default=cfg.get("re_is_cylinder_based", True, bool),
                    help="Interpret --re as Re_D based on cylinder diameter when cylinder is enabled")
@@ -488,6 +394,9 @@ def parse_args():
                    default=post_cfg.get(
                        "auto_vorticity_video_frame_stride", 1, int),
                    help="Use every nth snapshot when auto-generating the vorticity GIF")
+    p.add_argument("--draw-cylinder-overlay", type=str_to_bool,
+                   default=post_cfg.get("draw_cylinder_overlay", True, bool),
+                   help="Draw the cylinder/body outline on generated flow plots and GIFs")
     p.add_argument("--verbose",  type=str_to_bool, default=cfg.get("verbose", True, bool),
                    help="Print periodic diagnostics during the time loop")
 
@@ -669,118 +578,15 @@ def _resolve_indent_geometry(args, radius: float) -> tuple[float, float]:
     return indent_width, indent_depth
 
 
-def _resolve_sweeping_jet_geometry(args, radius: float, inflow_u: float) -> dict:
-    velocity_ratio = max(float(args.sweeping_jet_velocity_ratio), 0.0)
-    jet_speed = velocity_ratio * abs(float(inflow_u))
-    slot_depth = float(args.sweeping_jet_slot_depth)
-    if slot_depth <= 0.0:
-        slot_depth = 0.15 * radius
-
-    frequency = float(args.sweeping_jet_frequency)
-    if frequency <= 0.0:
-        diameter = 2.0 * radius
-        frequency = 0.16 * abs(float(inflow_u)) / diameter if diameter > 0.0 else 0.0
-
-    return {
-        "jet_speed": jet_speed,
-        "frequency": frequency,
-        "center_deg": float(args.sweeping_jet_center_deg),
-        "slot_width_deg": float(args.sweeping_jet_slot_width_deg),
-        "slot_depth": slot_depth,
-        "angle_deg": float(args.sweeping_jet_angle_deg),
-        "phase_rad": np.deg2rad(float(args.sweeping_jet_phase_deg)),
-    }
-
-
-def _resolve_geometry_resolved_jet_geometry(args, radius: float, inflow_u: float) -> dict:
-    jet_cfg = _resolve_sweeping_jet_geometry(args, radius, inflow_u)
-
-    cavity_width = float(args.resolved_jet_cavity_width)
-    cavity_height = float(args.resolved_jet_cavity_height)
-    slot_width = float(args.resolved_jet_slot_width)
-    slot_height = float(args.resolved_jet_slot_height)
-    feed_width = float(args.resolved_jet_feed_width)
-    feed_height = float(args.resolved_jet_feed_height)
-    nozzle_length = float(args.resolved_jet_nozzle_length)
-    slot_exit_width = float(args.resolved_jet_slot_exit_width)
-    island_wall_gap = float(args.resolved_jet_island_wall_gap)
-    island_center_gap = float(args.resolved_jet_island_center_gap)
-    island_leading_gap = float(args.resolved_jet_island_leading_gap)
-    island_trailing_gap = float(args.resolved_jet_island_trailing_gap)
-    island_taper = float(args.resolved_jet_island_taper)
-
-    if cavity_width <= 0.0:
-        cavity_width = 0.9 * radius
-    if cavity_height <= 0.0:
-        cavity_height = 0.75 * radius
-    if slot_width <= 0.0:
-        slot_width = 0.24 * radius
-    if slot_height <= 0.0:
-        slot_height = 0.18 * radius
-    if feed_width <= 0.0:
-        feed_width = 0.45 * radius
-    if feed_height <= 0.0:
-        feed_height = 0.22 * radius
-    if nozzle_length <= 0.0:
-        nozzle_length = min(
-            max(1.5 * slot_height, 0.35 * cavity_height),
-            0.65 * cavity_height,
-        )
-    plenum_depth = max(cavity_height - nozzle_length, 1e-12)
-    if slot_exit_width <= 0.0:
-        slot_exit_width = min(cavity_width, slot_width + 2.0 * slot_height)
-    if island_wall_gap <= 0.0:
-        island_wall_gap = 0.12 * cavity_width
-    if island_center_gap <= 0.0:
-        island_center_gap = max(0.22 * cavity_width, feed_width + 0.08 * cavity_width)
-    if island_leading_gap <= 0.0:
-        island_leading_gap = 0.18 * plenum_depth
-    if island_trailing_gap <= 0.0:
-        island_trailing_gap = 0.18 * plenum_depth
-
-    island_height = 0.5 * max(
-        cavity_width - 2.0 * island_wall_gap - island_center_gap,
-        0.18 * cavity_width,
-    )
-    if island_taper <= 0.0:
-        island_taper = 0.18 * island_height
-
-    jet_cfg.update({
-        "cavity_width": cavity_width,
-        "cavity_height": cavity_height,
-        "slot_width": slot_width,
-        "slot_height": slot_height,
-        "feed_width": feed_width,
-        "feed_height": feed_height,
-        "nozzle_length": nozzle_length,
-        "slot_exit_width": slot_exit_width,
-        "island_wall_gap": island_wall_gap,
-        "island_center_gap": island_center_gap,
-        "island_leading_gap": island_leading_gap,
-        "island_trailing_gap": island_trailing_gap,
-        "island_taper": island_taper,
-    })
-    return jet_cfg
-
-
-def _resolve_experiment_overrides(args) -> tuple[str, str]:
+def _resolve_experiment_overrides(args) -> str:
     experiment = _normalize_cylinder_experiment_mode(
         getattr(args, "cylinder_experiment", "none")
     )
     if experiment == "top-indent":
-        return "circle-with-top-indent", "none"
-    if experiment == "simulated-sweeping-jet":
-        return "circle", "sweeping-jet"
-    if experiment == "geometry-resolved-sweeping-jet":
-        return "circle", "geometry-resolved-sweeping-jet"
-
-    shape = _normalize_cylinder_geometry_mode(
+        return "circle-with-top-indent"
+    return _normalize_cylinder_geometry_mode(
         getattr(args, "cylinder_geometry_mode", getattr(args, "ibm_shape", "circle"))
     )
-    actuation = _normalize_cylinder_actuation_mode(
-        getattr(args, "cylinder_actuation_mode", "none")
-    )
-    return shape, actuation
 
 
 def _plot_ibm_outline(
@@ -790,217 +596,13 @@ def _plot_ibm_outline(
     linewidth: float = 1.6,
     time: float = 0.0,
 ) -> None:
-    def local_box_points(
-        center_x: float,
-        center_y: float,
-        tangent_x: float,
-        tangent_y: float,
-        normal_x: float,
-        normal_y: float,
-        s0: float,
-        s1: float,
-        n0: float,
-        n1: float,
-    ) -> tuple[list[float], list[float]]:
-        corners = [
-            (s0, n0),
-            (s1, n0),
-            (s1, n1),
-            (s0, n1),
-            (s0, n0),
-        ]
-        x_pts = [
-            center_x + s * tangent_x + n * normal_x
-            for s, n in corners
-        ]
-        y_pts = [
-            center_y + s * tangent_y + n * normal_y
-            for s, n in corners
-        ]
-        return x_pts, y_pts
-
-    def local_poly_points(
-        center_x: float,
-        center_y: float,
-        tangent_x: float,
-        tangent_y: float,
-        normal_x: float,
-        normal_y: float,
-        corners: list[tuple[float, float]],
-    ) -> tuple[list[float], list[float]]:
-        x_pts = [
-            center_x + s * tangent_x + n * normal_x
-            for s, n in corners
-        ]
-        y_pts = [
-            center_y + s * tangent_y + n * normal_y
-            for s, n in corners
-        ]
-        return x_pts, y_pts
-
-    def local_curve_points(
-        center_x: float,
-        center_y: float,
-        tangent_x: float,
-        tangent_y: float,
-        normal_x: float,
-        normal_y: float,
-        s_vals: np.ndarray,
-        n_vals: np.ndarray,
-    ) -> tuple[list[float], list[float]]:
-        x_pts = [
-            center_x + s * tangent_x + n * normal_x
-            for s, n in zip(s_vals, n_vals)
-        ]
-        y_pts = [
-            center_y + s * tangent_y + n * normal_y
-            for s, n in zip(s_vals, n_vals)
-        ]
-        return x_pts, y_pts
-
     cx, cy, radius = _cylinder_center_at_time(args, time)
-    shape, actuation_mode = _resolve_experiment_overrides(args)
+    shape = _resolve_experiment_overrides(args)
     theta = np.linspace(0.0, 2.0 * np.pi, 361)
     x = cx + radius * np.cos(theta)
     y = cy + radius * np.sin(theta)
     if shape == "circle":
         ax.plot(x, y, color=color, linewidth=linewidth, zorder=6)
-        if actuation_mode == "geometry-resolved-sweeping-jet":
-            jet_cfg = _resolve_geometry_resolved_jet_geometry(args, radius, 1.0)
-            slot_center_angle = np.deg2rad(jet_cfg["center_deg"])
-            normal_x = float(np.cos(slot_center_angle))
-            normal_y = float(np.sin(slot_center_angle))
-            tangent_x = float(-np.sin(slot_center_angle))
-            tangent_y = float(np.cos(slot_center_angle))
-            nozzle_length = jet_cfg["nozzle_length"]
-            plenum_n1 = radius - jet_cfg["slot_height"] - nozzle_length
-            plenum_depth = plenum_n1 - (radius - jet_cfg["slot_height"] - jet_cfg["cavity_height"])
-            cavity_x, cavity_y = local_poly_points(
-                cx, cy,
-                tangent_x, tangent_y,
-                normal_x, normal_y,
-                [
-                    (-0.5 * jet_cfg["cavity_width"], radius - jet_cfg["slot_height"] - jet_cfg["cavity_height"]),
-                    (0.5 * jet_cfg["cavity_width"], radius - jet_cfg["slot_height"] - jet_cfg["cavity_height"]),
-                    (0.5 * jet_cfg["cavity_width"], plenum_n1),
-                    (0.5 * jet_cfg["slot_width"], radius - jet_cfg["slot_height"]),
-                    (-0.5 * jet_cfg["slot_width"], radius - jet_cfg["slot_height"]),
-                    (-0.5 * jet_cfg["cavity_width"], plenum_n1),
-                    (-0.5 * jet_cfg["cavity_width"], radius - jet_cfg["slot_height"] - jet_cfg["cavity_height"]),
-                ],
-            )
-            center_gap_s = jet_cfg["island_center_gap"]
-            island_height = 0.5 * max(
-                jet_cfg["cavity_width"] - 2.0 * jet_cfg["island_wall_gap"] - center_gap_s,
-                0.18 * jet_cfg["cavity_width"],
-            )
-            island_n0 = (
-                radius - jet_cfg["slot_height"] - jet_cfg["cavity_height"]
-                + jet_cfg["island_leading_gap"]
-            )
-            island_n1 = plenum_n1 - jet_cfg["island_trailing_gap"]
-            island_taper = jet_cfg["island_taper"] if jet_cfg["island_taper"] > 0.0 else 0.18 * island_height
-            upper_s0 = 0.5 * center_gap_s
-            upper_s1 = upper_s0 + island_height
-            lower_s1 = -0.5 * center_gap_s
-            lower_s0 = lower_s1 - island_height
-            upper_splitter_x, upper_splitter_y = local_poly_points(
-                cx, cy,
-                tangent_x, tangent_y,
-                normal_x, normal_y,
-                [
-                    (upper_s0, island_n0),
-                    (upper_s1, island_n0),
-                    (upper_s1 - island_taper, island_n1),
-                    (upper_s0 + island_taper, island_n1),
-                    (upper_s0, island_n0),
-                ],
-            )
-            lower_splitter_x, lower_splitter_y = local_poly_points(
-                cx, cy,
-                tangent_x, tangent_y,
-                normal_x, normal_y,
-                [
-                    (lower_s0, island_n0),
-                    (lower_s1, island_n0),
-                    (lower_s1 - island_taper, island_n1),
-                    (lower_s0 + island_taper, island_n1),
-                    (lower_s0, island_n0),
-                ],
-            )
-            slot_exit_width = jet_cfg["slot_exit_width"]
-            slot_n0 = radius - jet_cfg["slot_height"]
-            slot_half_width0 = 0.5 * jet_cfg["slot_width"]
-            slot_half_width1 = 0.5 * slot_exit_width
-
-            def slot_minus_circle(n_val: float) -> float:
-                alpha = (n_val - slot_n0) / max(jet_cfg["slot_height"], 1e-12)
-                half_width = (1.0 - alpha) * slot_half_width0 + alpha * slot_half_width1
-                return half_width - np.sqrt(max(radius ** 2 - n_val ** 2, 0.0))
-
-            n_lo = slot_n0
-            n_hi = radius
-            for _ in range(50):
-                n_mid = 0.5 * (n_lo + n_hi)
-                if slot_minus_circle(n_mid) > 0.0:
-                    n_hi = n_mid
-                else:
-                    n_lo = n_mid
-            n_int = 0.5 * (n_lo + n_hi)
-            s_int = np.sqrt(max(radius ** 2 - n_int ** 2, 0.0))
-
-            theta_arc = np.linspace(
-                np.arctan2(-s_int, n_int),
-                np.arctan2(s_int, n_int),
-                80,
-            )
-            arc_s = radius * np.sin(theta_arc)
-            arc_n = radius * np.cos(theta_arc)
-            slot_s = np.concatenate((
-                np.array([-slot_half_width0, slot_half_width0, s_int]),
-                arc_s[::-1],
-                np.array([-s_int, -slot_half_width0]),
-            ))
-            slot_n = np.concatenate((
-                np.array([slot_n0, slot_n0, n_int]),
-                arc_n[::-1],
-                np.array([n_int, slot_n0]),
-            ))
-            slot_x, slot_y = local_curve_points(
-                cx, cy,
-                tangent_x, tangent_y,
-                normal_x, normal_y,
-                slot_s,
-                slot_n,
-            )
-            ax.plot(
-                cavity_x,
-                cavity_y,
-                color=color,
-                linewidth=linewidth * 0.9,
-                zorder=6,
-            )
-            ax.plot(
-                upper_splitter_x,
-                upper_splitter_y,
-                color=color,
-                linewidth=linewidth * 0.9,
-                zorder=6,
-            )
-            ax.plot(
-                lower_splitter_x,
-                lower_splitter_y,
-                color=color,
-                linewidth=linewidth * 0.9,
-                zorder=6,
-            )
-            ax.plot(
-                slot_x,
-                slot_y,
-                color=color,
-                linewidth=linewidth * 0.9,
-                zorder=6,
-            )
         return
 
     indent_width, indent_depth = _resolve_indent_geometry(args, radius)
@@ -1278,7 +880,7 @@ def run(args, grid=None, grid_loaded_from_file=False):
     r = None
     if args.cylinder:
         cx, cy, r = _resolve_cylinder_geometry(args)
-        ibm_shape, actuation_mode = _resolve_experiment_overrides(args)
+        ibm_shape = _resolve_experiment_overrides(args)
         rotation_mode = _normalize_cylinder_rotation_mode(args.cylinder_rotation_mode)
         translation_cfg = _resolve_cylinder_translation(args, cx, cy, r)
         translation_mode = translation_cfg["mode"]
@@ -1293,18 +895,6 @@ def run(args, grid=None, grid_loaded_from_file=False):
         if rotation_mode != "stationary" and translation_mode != "stationary":
             raise ValueError(
                 "cylinder rotation and cylinder translation are mutually exclusive"
-            )
-        if actuation_mode != "none" and ibm_shape != "circle":
-            raise ValueError(
-                "jet actuation currently supports circle geometry only"
-            )
-        if actuation_mode != "none" and rotation_mode != "stationary":
-            raise ValueError(
-                "jet actuation currently supports stationary cylinders only"
-            )
-        if actuation_mode != "none" and translation_mode != "stationary":
-            raise ValueError(
-                "jet actuation currently supports stationary cylinders only"
             )
         if translation_mode != "stationary":
             ibm.add_translating_circle(
@@ -1344,45 +934,6 @@ def run(args, grid=None, grid_loaded_from_file=False):
                 )
             else:
                 ibm.add_circle(cx, cy, r)
-        if actuation_mode == "sweeping-jet":
-            jet_cfg = _resolve_sweeping_jet_geometry(args, r, bc.u_inf)
-            ibm.add_sweeping_jet_circle(
-                cx=cx,
-                cy=cy,
-                radius=r,
-                jet_speed=jet_cfg["jet_speed"],
-                slot_center_angle_deg=jet_cfg["center_deg"],
-                slot_width_angle_deg=jet_cfg["slot_width_deg"],
-                slot_depth=jet_cfg["slot_depth"],
-                sweep_amplitude_deg=jet_cfg["angle_deg"],
-                frequency=jet_cfg["frequency"],
-                phase=jet_cfg["phase_rad"],
-            )
-        elif actuation_mode == "geometry-resolved-sweeping-jet":
-            jet_cfg = _resolve_geometry_resolved_jet_geometry(args, r, bc.u_inf)
-            ibm.add_geometry_resolved_sweeping_jet_circle(
-                cx=cx,
-                cy=cy,
-                radius=r,
-                jet_speed=jet_cfg["jet_speed"],
-                cavity_width=jet_cfg["cavity_width"],
-                cavity_height=jet_cfg["cavity_height"],
-                slot_width=jet_cfg["slot_width"],
-                slot_height=jet_cfg["slot_height"],
-                feed_width=jet_cfg["feed_width"],
-                feed_height=jet_cfg["feed_height"],
-                nozzle_length=jet_cfg["nozzle_length"],
-                slot_exit_width=jet_cfg["slot_exit_width"],
-                island_wall_gap=jet_cfg["island_wall_gap"],
-                island_center_gap=jet_cfg["island_center_gap"],
-                island_leading_gap=jet_cfg["island_leading_gap"],
-                island_trailing_gap=jet_cfg["island_trailing_gap"],
-                island_taper=jet_cfg["island_taper"],
-                slot_center_angle_deg=jet_cfg["center_deg"],
-                sweep_amplitude_deg=jet_cfg["angle_deg"],
-                frequency=jet_cfg["frequency"],
-                phase=jet_cfg["phase_rad"],
-            )
         if is_root and args.verbose:
             print(
                 f"  IBM cylinder: centre=({cx:.2f},{cy:.2f}), r={r:.4f}, "
@@ -1393,28 +944,6 @@ def run(args, grid=None, grid_loaded_from_file=False):
                 print(
                     "  Top indent   : "
                     f"width={indent_width:.4f}, depth={indent_depth:.4f}"
-                )
-            if actuation_mode == "sweeping-jet":
-                jet_cfg = _resolve_sweeping_jet_geometry(args, r, bc.u_inf)
-                print(
-                    "  Jet actuator : "
-                    f"speed={jet_cfg['jet_speed']:.4f}, "
-                    f"f={jet_cfg['frequency']:.4f}, "
-                    f"slot_center={jet_cfg['center_deg']:.2f} deg, "
-                    f"slot_width={jet_cfg['slot_width_deg']:.2f} deg, "
-                    f"slot_depth={jet_cfg['slot_depth']:.4f}, "
-                    f"sweep={jet_cfg['angle_deg']:.2f} deg"
-                )
-            elif actuation_mode == "geometry-resolved-sweeping-jet":
-                jet_cfg = _resolve_geometry_resolved_jet_geometry(args, r, bc.u_inf)
-                print(
-                    "  Jet actuator : "
-                    f"mode=geometry-resolved, speed={jet_cfg['jet_speed']:.4f}, "
-                    f"f={jet_cfg['frequency']:.4f}, "
-                    f"cavity=({jet_cfg['cavity_width']:.4f} x {jet_cfg['cavity_height']:.4f}), "
-                    f"slot=({jet_cfg['slot_width']:.4f} x {jet_cfg['slot_height']:.4f}), "
-                    f"feed=({jet_cfg['feed_width']:.4f} x {jet_cfg['feed_height']:.4f}), "
-                    f"sweep={jet_cfg['angle_deg']:.2f} deg"
                 )
             if rotation_mode == "oscillatory":
                 print(
@@ -1550,7 +1079,7 @@ def _plot_results(solver, grid, args):
 
     fig, axes = plt.subplots(1, 2, figsize=(10, 4))
 
-    if args.cylinder:
+    if args.cylinder and args.draw_cylinder_overlay:
         # Draw the immersed cylinder on every panel so geometry alignment
         # is visible in vorticity, pressure, and velocity plots.
         for ax in axes:
@@ -1681,7 +1210,7 @@ def _plot_grid(grid, args):
             )
         )
 
-    if args.cylinder:
+    if args.cylinder and args.draw_cylinder_overlay:
         _plot_ibm_outline(mesh_ax, args, color="#001219", linewidth=1.8)
         _plot_ibm_outline(density_ax, args, color="white", linewidth=1.6)
 
@@ -1820,6 +1349,7 @@ def _run_auto_outputs(grid, args):
                 frame_stride=max(int(args.auto_vorticity_video_frame_stride), 1),
                 verbose=bool(args.verbose),
                 config_path=args.config,
+                draw_cylinder_overlay=bool(args.draw_cylinder_overlay),
             )
         except Exception as exc:
             print(f"  Warning: automatic vorticity video failed: {exc}")
