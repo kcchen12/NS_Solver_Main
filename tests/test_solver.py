@@ -76,6 +76,14 @@ class TestUniformFlow:
         assert np.allclose(v_int, 0.0, atol=0.03), (
             f"v not zero: max = {np.max(np.abs(v_int)):.2e}")
 
+    def test_pressure_update_does_not_accumulate_stale_gauge(self):
+        """The predictor omits old pressure, so p is the new correction field."""
+        self.solver.p[:] = 25.0
+        dt = self.solver.suggest_dt(cfl_target=0.3)
+        self.solver.step(dt)
+
+        assert np.max(np.abs(self.solver.p)) < 1.0
+
 
 # ---------------------------------------------------------------------------
 # Pressure solver
@@ -222,6 +230,33 @@ class TestIBMForcing:
         assert np.all(np.isfinite(solver.last_ibm_forcing_v))
         assert np.all(np.isfinite(solver.last_ibm_forcing_xc))
         assert np.all(np.isfinite(solver.last_ibm_forcing_yc))
+
+    def test_free_y_ibm_circle_advances_and_enforces_current_mask(self):
+        g = CartesianGrid(20, 12, lx=2.0, ly=1.0)
+        bc = channel_bc()
+        ibm = ImmersedBoundary(g)
+        ibm.add_free_y_circle(
+            cx=0.5,
+            cy=0.5,
+            radius=0.1,
+            mass=1.0,
+            damping=0.0,
+            stiffness=1.0,
+            initial_velocity_y=0.05,
+        )
+
+        solver = FractionalStepSolver(g, bc, nu=0.01, ibm=ibm)
+        solver.init_fields(u0=1.0)
+
+        dt = solver.suggest_dt(cfl_target=0.3)
+        solver.step(dt)
+        state = ibm.first_free_y_circle_state()
+
+        assert state is not None
+        assert np.isfinite(state["center_y"])
+        assert np.isfinite(state["velocity_y"])
+        assert np.allclose(solver.u[ibm.mask_u], 0.0, atol=1e-12)
+        assert np.allclose(solver.v[ibm.mask_v], state["velocity_y"], atol=1e-12)
 
     def test_rotating_ibm_circle_imposes_nonzero_wall_velocity(self):
         g = CartesianGrid(20, 12, lx=2.0, ly=1.0)

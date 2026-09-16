@@ -13,8 +13,13 @@ draw_cylinder_overlay = true
 auto_generate_coeff_history = true
 auto_generate_aero_report = true
 auto_generate_shedding_spectrum = false
+auto_generate_drag_decomposition = false
+auto_generate_drag_decomposition_plot = false
 auto_generate_pressure_coefficient_theta = false
 auto_generate_time_averaged_fields = false
+
+# Surface-force contour offset in local near-cylinder grid spacings.
+surface_force_sample_offset_factor = 0.5
 
 # Time trimming for post-processing
 auto_coeff_t_min = 0.5

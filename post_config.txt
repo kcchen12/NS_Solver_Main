@@ -7,15 +7,25 @@ auto_generate_grid_spacing = false
 auto_generate_ibm_forcing = false
 auto_generate_vorticity_video = on
 auto_vorticity_video_frame_stride = 5
-draw_cylinder_overlay = true
+draw_cylinder_overlay = false
 
 # Aerodynamic outputs
 auto_generate_coeff_history = true
 auto_generate_aero_report = true
 auto_generate_shedding_spectrum = true
+auto_generate_drag_decomposition = true
+auto_generate_drag_decomposition_plot = true
 auto_generate_pressure_coefficient_theta = true
 auto_generate_time_averaged_fields = true
 
+# Surface-force contour offset in local near-cylinder grid spacings.
+# Used by automatic aerodynamic reports/coefficient histories when integrating
+# pressure + viscous surface stress from snapshots. Smaller samples closer to
+# the IBM boundary; 0.5 improved stationary Re=100 lift/drag.
+surface_force_sample_offset_factor = 0.5
+
 # Time trimming for post-processing
-auto_coeff_t_min = 0.5
+auto_coeff_t_min = 1.0
 auto_aero_t_min = 1.0
+# Values between 0 and 1 mean a fraction of the saved run; 0.70 uses the last 30%.
+auto_aero_stats_t_min = 0.53

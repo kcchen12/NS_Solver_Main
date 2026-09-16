@@ -3,8 +3,8 @@
 # Format: key = value
 
 # Grid parameters
-nx = 400
-ny = 400
+nx = 256
+ny = 512
 
 # Domain dimensions
 lx = 25.0
@@ -47,11 +47,11 @@ outflow_mode = convective
 outflow_speed = 1.0
 
 # Time integration
-t_end = 100.0
-cfl = .5
+t_end = 160.0
+cfl = 0.25
 
 # I/O parameters
-save_dt = 0.2
+save_dt = 0.1
 outdir = output
 # Grid generation (used by both main.py and pre_generate_grid.py)
 uniform_grid = false
@@ -61,9 +61,9 @@ grid_beta_x = 2.0
 grid_beta_y = 2.0
 
 grid_uniform_x_start = -2.0
-grid_uniform_x_end = 15.0
-grid_uniform_y_start = -5.0
-grid_uniform_y_end = 5.0
+grid_uniform_x_end = 12.0
+grid_uniform_y_start = -4.0
+grid_uniform_y_end = 4.0
 
 # Features (true/false)
 cylinder = true
@@ -95,7 +95,7 @@ cylinder_rotation_phase_deg = 0.0
 #   oscillatory-xy -> left/right and up/down sinusoidal center motion
 # Amplitudes are percentages of cylinder diameter; 10% keeps a small sweep
 # inside the concentrated mesh when the uniform core is sized around the body.
-cylinder_translation_mode = oscillatory-y
+cylinder_translation_mode = stationary
 cylinder_translation_amplitude_percent = 10.0
 cylinder_translation_x_percent = 10.0
 cylinder_translation_y_percent = 10.0

@@ -1,13 +1,46 @@
 # NS_Solver Example Experimental Configuration
 # Optional cylinder experiments for main.py.
 
-# Cylinder experiment controls
-cylinder_experiment = none
+# Master switch for every option in this file.
+enable_experimental_config = false
 
-# Optional alternate geometry / IBM aliases
-cylinder_geometry_mode = circle
-# ibm_shape = circle
+# Domain truncation controls
+# Drops this many grid cells from BOTH the bottom and top y boundaries.
+truncate_y_cells = 0
+
+# Cylinder experiment controls
+# If true, request spring-mass-damper cylinder degrees of freedom.
+# free-x allows streamwise motion; free-y allows transverse motion.
+cylinder_free_x_dof = false
+cylinder_free_x_mass = 100.0
+cylinder_free_x_damping = 5.0
+cylinder_free_x_stiffness = 20.0
+cylinder_free_x_initial_velocity = 0.0
+cylinder_free_x_force_relaxation = 0.05
+cylinder_free_x_max_displacement_percent = 25.0
+cylinder_free_x_max_speed = 0.25
+
+cylinder_free_y_dof = false
+cylinder_free_y_mass = 100.0
+cylinder_free_y_damping = 5.0
+cylinder_free_y_stiffness = 20.0
+cylinder_free_y_initial_velocity = 0.0
+cylinder_free_y_force_relaxation = 0.05
+cylinder_free_y_max_displacement_percent = 25.0
+cylinder_free_y_max_speed = 0.25
+
+# cylinder_experiment options:
+#   circle
+#   top-indent
+#   square
+#   airfoil
+cylinder_experiment = circle
 
 # Top-indent cylinder controls
 cylinder_indent_width = 0.0
 cylinder_indent_depth = 0.0
+
+# Basic symmetric NACA 00xx airfoil controls
+airfoil_chord = -1.0
+airfoil_thickness_percent = 12.0
+airfoil_angle_deg = 0.0

@@ -180,7 +180,7 @@ class FractionalStepSolver:
         # ----------------------------------------------------------------
         # Step 4 — Pressure update
         # ----------------------------------------------------------------
-        self.p += phi
+        self.p[:, :] = phi
 
         # ----------------------------------------------------------------
         # Step 5 — Apply only essential BCs to corrected velocity
@@ -189,7 +189,12 @@ class FractionalStepSolver:
         # ----------------------------------------------------------------
         apply_post_correction_bc(u_star, v_star, grid, bc, dt=dt)
         if self.ibm is not None and self.ibm.has_solid:
-            _, _, self.last_ibm_forcing_u, self.last_ibm_forcing_v = self.ibm.apply(
+            (
+                self.last_ibm_force_x,
+                self.last_ibm_force_y,
+                self.last_ibm_forcing_u,
+                self.last_ibm_forcing_v,
+            ) = self.ibm.apply(
                 u_star,
                 v_star,
                 dt=dt,
@@ -204,6 +209,8 @@ class FractionalStepSolver:
                 self.last_ibm_forcing_v[:, :-1] +
                 self.last_ibm_forcing_v[:, 1:]
             )
+            self.ibm.advance_free_y_circles(dt)
+            self.ibm.apply(u_star, v_star, time=self.t + dt)
 
         self.u = u_star
         self.v = v_star
@@ -230,6 +237,8 @@ class FractionalStepSolver:
     def suggest_dt(self, cfl_target: float = 0.5, dt_max: float = 0.1) -> float:
         """Suggest a stable time step based on convective CFL and diffusion."""
         grid = self.grid
+        if not np.all(np.isfinite(self.u)) or not np.all(np.isfinite(self.v)):
+            raise FloatingPointError("velocity field contains non-finite values")
         u_max = max(np.max(np.abs(self.u)), 1e-12)
         v_max = max(np.max(np.abs(self.v)), 1e-12)
         dt_conv = cfl_target * min(grid.dx_min / u_max, grid.dy_min / v_max)

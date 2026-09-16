@@ -122,8 +122,12 @@ Initialization and runtime:
 
 ### Experimental Config
 
-- `cylinder_experiment`
-- `cylinder_geometry_mode`, `ibm_shape`
+- `enable_experimental_config`: master switch; when `false`, all other options in `experimental_config.txt` are ignored
+- `truncate_y_cells`: drop this many cells from both the bottom and top y boundaries before running
+- `cylinder_experiment`: body shape selector, one of `circle`, `top-indent`, `square`, or `airfoil`
+- `cylinder_free_x_dof`, `cylinder_free_y_dof`: enable streamwise and/or transverse spring-mass-damper cylinder motion for VIV studies
+- `cylinder_free_x_mass`, `cylinder_free_y_mass`, `cylinder_free_x_damping`, `cylinder_free_y_damping`, `cylinder_free_x_stiffness`, `cylinder_free_y_stiffness`: spring-mass-damper parameters for the free cylinder
+- `cylinder_free_x_initial_velocity`, `cylinder_free_y_initial_velocity`: initial streamwise/transverse cylinder velocity
 - `cylinder_indent_width`, `cylinder_indent_depth`
 
 ### Post Config
@@ -133,6 +137,8 @@ Initialization and runtime:
 - `auto_generate_coeff_history`: automatically generate `results/coeff_history.png`
 - `auto_generate_aero_report`: automatically generate `results/aero_report.txt`
 - `auto_generate_shedding_spectrum`: automatically generate `results/shedding_spectrum.png`
+- `auto_generate_drag_decomposition`: automatically generate `results/drag_decomposition.csv`
+- `auto_generate_drag_decomposition_plot`: automatically generate `results/drag_decomposition.png`
 - `auto_generate_pressure_coefficient_theta`: automatically generate `results/pressure_coefficient_theta.csv` and `results/pressure_coefficient_theta.png`
 - `auto_generate_time_averaged_fields`: automatically generate `results/time_averaged_fields.npz`
 - `auto_generate_time_averaged_plots`: automatically generate `results/time_averaged_fields.png`
@@ -140,6 +146,7 @@ Initialization and runtime:
 - `auto_generate_vorticity_video`: automatically generate `results/vorticity.gif` from all saved snapshots
 - `auto_vorticity_video_frame_stride`: use every `n`th snapshot when building the vorticity GIF
 - `draw_cylinder_overlay`: draw the cylinder/body outline on generated flow plots and GIFs
+- `surface_force_sample_offset_factor`: near-cylinder offset used by surface-stress aerodynamic post-processing
 - `auto_coeff_t_min`: minimum time for automatic coefficient-history plotting
 - `auto_aero_t_min`: minimum time for automatic aerodynamic analysis
 
@@ -209,6 +216,8 @@ Common outputs:
 - `results/result.png`: standard flow plot from `main.py` when `plot = true` in `post_config.txt`
 - `results/grid.png`: physical grid / spacing plot
 - `results/aero.csv`: coefficient and force history
+- `results/drag_decomposition.csv`: pressure and viscous force/coefficient history
+- `results/drag_decomposition.png`: pressure and viscous force/coefficient plot
 - `results/coeff_history.png`: drag/lift history figure
 - `results/aero_report.txt`: aerodynamic summary report
 

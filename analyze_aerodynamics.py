@@ -62,6 +62,29 @@ class SurfaceForcePlan:
     bilinear_plans: Tuple[BilinearPlan, ...]
 
 
+@dataclass(frozen=True)
+class SurfaceForceDiagnostics:
+    pressure_cp_min: float
+    pressure_cp_max: float
+    pressure_cd: float
+    pressure_cl: float
+    sample_spacing: float
+    sample_offset: float
+
+
+@dataclass(frozen=True)
+class SurfaceForceComponents:
+    pressure_fx: float
+    pressure_fy: float
+    viscous_fx: float
+    viscous_fy: float
+    sample_spacing: float
+    sample_offset: float
+
+
+_LAST_SURFACE_DIAGNOSTICS: Optional[SurfaceForceDiagnostics] = None
+
+
 def _time_from_filename(path: str) -> Optional[float]:
     """Extract snapshot time from filename pattern snap_<time>.npz."""
     name = os.path.basename(path)
@@ -197,7 +220,12 @@ def _estimate_scales(
     config = _read_config(config_path) if config_path else {}
     cfg_length_scale = config.get("aero_length_scale", None)
     cfg_use_cyl_d = bool(config.get("aero_use_cylinder_diameter", 0.0))
-    cylinder_radius = _resolve_cylinder_radius(config, ly)
+    with np.load(first_path, allow_pickle=False) as data:
+        radius_meta = _safe_scalar(data, "meta_cylinder_radius")
+    cylinder_radius = (
+        float(radius_meta) if radius_meta is not None
+        else _resolve_cylinder_radius(config, ly)
+    )
 
     if length_scale is not None:
         l_char = float(length_scale)
@@ -227,19 +255,55 @@ def _estimate_cylinder_geometry(
     """Estimate cylinder geometry from snapshot metadata and config."""
     _, _, lx, ly = _load_snapshot_grid_metadata(first_path)
     config = _read_config(config_path) if config_path else {}
+    with np.load(first_path, allow_pickle=False) as data:
+        center_x_meta = _safe_scalar(data, "meta_cylinder_center_x")
+        center_y_meta = _safe_scalar(data, "meta_cylinder_center_y")
+        radius_meta = _safe_scalar(data, "meta_cylinder_radius")
 
     if cylinder_radius is not None:
         r = float(cylinder_radius)
+    elif radius_meta is not None:
+        r = float(radius_meta)
     else:
         r = _resolve_cylinder_radius(config, ly)
 
-    center_x, center_y = _resolve_cylinder_center(config, lx, ly)
+    center_x_cfg, center_y_cfg = _resolve_cylinder_center(config, lx, ly)
+    center_x = center_x_cfg if center_x_meta is None else float(center_x_meta)
+    center_y = center_y_cfg if center_y_meta is None else float(center_y_meta)
 
     return CylinderGeometry(
         center_x=center_x,
         center_y=center_y,
         radius=r,
     )
+
+
+def _estimate_kinematic_viscosity(
+    first_path: str,
+    config_path: Optional[str],
+    u_ref: float,
+    geom: CylinderGeometry,
+    char_length: float,
+) -> float:
+    with np.load(first_path, allow_pickle=False) as data:
+        re_meta = _safe_scalar(data, "meta_re")
+        re_is_d_meta = _safe_scalar(data, "meta_re_is_cylinder_based")
+
+    config = _read_config(config_path) if config_path else {}
+    # Snapshot metadata describes the data being post-processed; prefer it over
+    # the current config file so archived Re sweeps are not reinterpreted after
+    # config.txt changes.
+    re_value = float(re_meta if re_meta is not None else config.get("re", 100.0))
+    if re_value <= 0.0:
+        raise ValueError("Reynolds number must be positive for surface forces.")
+
+    re_is_d = (
+        bool(re_is_d_meta)
+        if re_is_d_meta is not None
+        else bool(config.get("re_is_cylinder_based", 0.0))
+    )
+    length = 2.0 * geom.radius if re_is_d else char_length
+    return float(u_ref) * float(length) / re_value
 
 
 def _snapshot_cylinder_geometry(
@@ -293,6 +357,46 @@ def _apply_bilinear_plan(values: np.ndarray, plan: BilinearPlan) -> float:
         + plan.w21 * values[i + 1, j]
         + plan.w12 * values[i, j + 1]
         + plan.w22 * values[i + 1, j + 1]
+    )
+
+
+def _sample_bilinear(
+    values: np.ndarray,
+    x_grid: np.ndarray,
+    y_grid: np.ndarray,
+    x: float,
+    y: float,
+) -> float:
+    return _apply_bilinear_plan(values, _build_bilinear_plan(x_grid, y_grid, x, y))
+
+
+def _sample_bilinear_points(
+    values: np.ndarray,
+    x_grid: np.ndarray,
+    y_grid: np.ndarray,
+    x: np.ndarray,
+    y: np.ndarray,
+) -> np.ndarray:
+    """Vectorized bilinear interpolation for many points on one grid."""
+    i = np.searchsorted(x_grid, x) - 1
+    j = np.searchsorted(y_grid, y) - 1
+    i = np.clip(i, 0, len(x_grid) - 2).astype(int)
+    j = np.clip(j, 0, len(y_grid) - 2).astype(int)
+
+    x0 = x_grid[i]
+    x1 = x_grid[i + 1]
+    y0 = y_grid[j]
+    y1 = y_grid[j + 1]
+    tx = np.divide(x - x0, x1 - x0, out=np.zeros_like(x, dtype=float), where=x1 != x0)
+    ty = np.divide(y - y0, y1 - y0, out=np.zeros_like(y, dtype=float), where=y1 != y0)
+    tx = np.clip(tx, 0.0, 1.0)
+    ty = np.clip(ty, 0.0, 1.0)
+
+    return (
+        (1.0 - tx) * (1.0 - ty) * values[i, j]
+        + tx * (1.0 - ty) * values[i + 1, j]
+        + (1.0 - tx) * ty * values[i, j + 1]
+        + tx * ty * values[i + 1, j + 1]
     )
 
 
@@ -505,12 +609,159 @@ def _compute_pressure_forces(
     return float(f_x), float(f_y)
 
 
+def _cell_center_velocity(u: np.ndarray, v: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    return 0.5 * (u[:-1, :] + u[1:, :]), 0.5 * (v[:, :-1] + v[:, 1:])
+
+
+def _local_spacing_near_body(
+    coords: np.ndarray,
+    center: float,
+    radius: float,
+) -> float:
+    """Estimate representative spacing near the immersed-body surface."""
+    if len(coords) <= 1:
+        return 1.0
+    diffs = np.abs(np.diff(coords))
+    median_spacing = float(np.median(diffs))
+    band_half_width = float(radius) + 2.0 * median_spacing
+    segment_midpoints = 0.5 * (coords[:-1] + coords[1:])
+    near_body = np.abs(segment_midpoints - float(center)) <= band_half_width
+    if np.any(near_body):
+        return float(np.median(diffs[near_body]))
+    return median_spacing
+
+
+def _compute_surface_force_components(
+    u: np.ndarray,
+    v: np.ndarray,
+    p: np.ndarray,
+    xc: np.ndarray,
+    yc: np.ndarray,
+    geom: CylinderGeometry,
+    nu: float,
+    n_samples: int = 720,
+    sample_offset_factor: float = 0.5,
+) -> SurfaceForceComponents:
+    """Integrate pressure and viscous traction components on a circle.
+
+    This is an experimental Cartesian-grid postprocessor for IBM snapshots.
+    It samples fields slightly outside the immersed surface to avoid using
+    solid-interior values in the finite-difference velocity gradients.
+    """
+    global _LAST_SURFACE_DIAGNOSTICS
+    if nu <= 0.0:
+        raise ValueError("Kinematic viscosity must be positive for surface forces.")
+
+    u_c, v_c = _cell_center_velocity(u, v)
+    theta = np.linspace(0.0, 2.0 * np.pi, n_samples, endpoint=False)
+    n_x = np.cos(theta)
+    n_y = np.sin(theta)
+
+    dx_local = _local_spacing_near_body(xc, geom.center_x, geom.radius)
+    dy_local = _local_spacing_near_body(yc, geom.center_y, geom.radius)
+    h = max(min(abs(dx_local), abs(dy_local)), np.finfo(float).eps)
+    sample_offset = max(float(sample_offset_factor), 0.0) * h
+    arc_length = 2.0 * np.pi * geom.radius / float(n_samples)
+
+    x0 = geom.center_x + (geom.radius + sample_offset) * n_x
+    y0 = geom.center_y + (geom.radius + sample_offset) * n_y
+
+    pressure_samples = _sample_bilinear_points(p, xc, yc, x0, y0)
+    du_dx = (
+        _sample_bilinear_points(u_c, xc, yc, x0 + h, y0)
+        - _sample_bilinear_points(u_c, xc, yc, x0 - h, y0)
+    ) / (2.0 * h)
+    du_dy = (
+        _sample_bilinear_points(u_c, xc, yc, x0, y0 + h)
+        - _sample_bilinear_points(u_c, xc, yc, x0, y0 - h)
+    ) / (2.0 * h)
+    dv_dx = (
+        _sample_bilinear_points(v_c, xc, yc, x0 + h, y0)
+        - _sample_bilinear_points(v_c, xc, yc, x0 - h, y0)
+    ) / (2.0 * h)
+    dv_dy = (
+        _sample_bilinear_points(v_c, xc, yc, x0, y0 + h)
+        - _sample_bilinear_points(v_c, xc, yc, x0, y0 - h)
+    ) / (2.0 * h)
+
+    tau_xx = 2.0 * nu * du_dx
+    tau_yy = 2.0 * nu * dv_dy
+    tau_xy = nu * (du_dy + dv_dx)
+
+    pressure_centered = pressure_samples - np.mean(pressure_samples)
+    pressure_traction_x = -pressure_centered * n_x
+    pressure_traction_y = -pressure_centered * n_y
+    pressure_fx = float(arc_length * np.sum(pressure_traction_x))
+    pressure_fy = float(arc_length * np.sum(pressure_traction_y))
+    _LAST_SURFACE_DIAGNOSTICS = SurfaceForceDiagnostics(
+        pressure_cp_min=float(2.0 * np.min(pressure_centered)),
+        pressure_cp_max=float(2.0 * np.max(pressure_centered)),
+        pressure_cd=float(pressure_fx / 0.5),
+        pressure_cl=float(pressure_fy / 0.5),
+        sample_spacing=float(h),
+        sample_offset=float(sample_offset),
+    )
+
+    traction_x = tau_xx * n_x + tau_xy * n_y
+    traction_y = tau_xy * n_x + tau_yy * n_y
+    viscous_fx = float(arc_length * np.sum(traction_x))
+    viscous_fy = float(arc_length * np.sum(traction_y))
+
+    return SurfaceForceComponents(
+        pressure_fx=pressure_fx,
+        pressure_fy=pressure_fy,
+        viscous_fx=viscous_fx,
+        viscous_fy=viscous_fy,
+        sample_spacing=float(h),
+        sample_offset=float(sample_offset),
+    )
+
+
+def _compute_surface_stress_forces(
+    u: np.ndarray,
+    v: np.ndarray,
+    p: np.ndarray,
+    xc: np.ndarray,
+    yc: np.ndarray,
+    geom: CylinderGeometry,
+    nu: float,
+    n_samples: int = 720,
+    include_pressure: bool = False,
+    sample_offset_factor: float = 0.5,
+) -> Tuple[float, float]:
+    """Integrate viscous, or pressure plus viscous, traction on a circle.
+
+    Use force_source="surface-full" for the physical pressure plus viscous
+    estimate; force_source="surface" is a viscous-only diagnostic.
+    """
+    components = _compute_surface_force_components(
+        u,
+        v,
+        p,
+        xc,
+        yc,
+        geom,
+        nu=nu,
+        n_samples=n_samples,
+        sample_offset_factor=sample_offset_factor,
+    )
+    traction_x = components.viscous_fx
+    traction_y = components.viscous_fy
+    if include_pressure:
+        traction_x += components.pressure_fx
+        traction_y += components.pressure_fy
+
+    return traction_x, traction_y
+
+
 def _compute_forces(
     snapshot_path: str,
     xc: np.ndarray,
     yc: np.ndarray,
     geom: CylinderGeometry,
     force_source: str = "ibm",
+    nu: Optional[float] = None,
+    surface_sample_offset_factor: float = 0.5,
 ) -> Tuple[float, float]:
     """Compute x and y forces from a single snapshot."""
     with np.load(snapshot_path, allow_pickle=False) as data:
@@ -518,17 +769,85 @@ def _compute_forces(
         fy_meta = _safe_scalar(data, "meta_ibm_force_y")
         if force_source == "ibm" and fx_meta is not None and fy_meta is not None:
             return float(fx_meta), float(fy_meta)
-        if "p" not in data.files:
+        required = {"p"} if force_source == "pressure" else {"u", "v", "p"}
+        missing = sorted(required.difference(data.files))
+        if missing:
             available = ", ".join(sorted(data.files))
             raise KeyError(
-                f"Snapshot {os.path.basename(snapshot_path)!r} is missing field "
-                f"'p'. Available fields: {available}"
+                f"Snapshot {os.path.basename(snapshot_path)!r} is missing field(s) "
+                f"{missing}. Available fields: {available}"
             )
-        p = data["p"]
+        p = np.array(data["p"], copy=True)
+        u = np.array(data["u"], copy=True) if "u" in required else None
+        v = np.array(data["v"], copy=True) if "v" in required else None
         snapshot_geom = _snapshot_cylinder_geometry(data, geom)
 
     force_plan = _build_surface_force_plan(xc, yc, snapshot_geom)
+    if force_source == "pressure":
+        return _compute_pressure_forces(p, force_plan)
+    if force_source in {"surface", "surface-full"}:
+        if nu is None:
+            raise ValueError(
+                f"force_source={force_source!r} requires a kinematic viscosity."
+            )
+        return _compute_surface_stress_forces(
+            u,
+            v,
+            p,
+            xc,
+            yc,
+            snapshot_geom,
+            nu=nu,
+            include_pressure=(force_source == "surface-full"),
+            sample_offset_factor=surface_sample_offset_factor,
+        )
     return _compute_pressure_forces(p, force_plan)
+
+
+def _snapshot_has_ibm_force_metadata(snapshot_path: str) -> bool:
+    """Return whether a snapshot carries direct IBM force diagnostics."""
+    try:
+        with np.load(snapshot_path, allow_pickle=False) as data:
+            return (
+                _safe_scalar(data, "meta_ibm_force_x") is not None
+                and _safe_scalar(data, "meta_ibm_force_y") is not None
+            )
+    except Exception:
+        return False
+
+
+def _snapshot_has_fields(snapshot_path: str, required: set[str]) -> bool:
+    try:
+        with np.load(snapshot_path, allow_pickle=False) as data:
+            return required.issubset(set(data.files))
+    except Exception:
+        return False
+
+
+def _resolve_force_source(force_source: str, snapshots: List[Tuple[float, str]]) -> str:
+    """Resolve automatic force source for available snapshot diagnostics."""
+    source = str(force_source).strip().lower()
+    if source not in {"auto", "ibm", "pressure", "surface", "surface-full"}:
+        raise ValueError(
+            "force_source must be 'auto', 'ibm', 'pressure', 'surface', or 'surface-full', "
+            f"got {force_source!r}"
+        )
+    if source in {"pressure", "surface", "surface-full"}:
+        return source
+    if not snapshots:
+        return "pressure"
+
+    first_snapshot = snapshots[0][1]
+    if source == "ibm":
+        if _snapshot_has_ibm_force_metadata(first_snapshot):
+            return "ibm"
+        return "pressure"
+
+    if _snapshot_has_fields(first_snapshot, {"u", "v", "p"}):
+        return "surface-full"
+    if _snapshot_has_ibm_force_metadata(first_snapshot):
+        return "ibm"
+    return "pressure"
 
 
 def _load_grid_faces_for_snapshot(
@@ -580,8 +899,10 @@ def plot_shedding_spectrum(
     f_max: float = 2.0,
     char_length: Optional[float] = None,
     u_ref: Optional[float] = None,
+    mark_peaks: bool = False,
+    show_title: bool = True,
 ) -> None:
-    """Plot the Fourier energy spectrum of C_l and mark dominant shedding peaks."""
+    """Plot the Fourier energy spectrum of C_l."""
     plt.switch_backend("Agg")
     arr = np.genfromtxt(csv_path, delimiter=",", names=True)
     if arr.size == 0:
@@ -603,39 +924,41 @@ def plot_shedding_spectrum(
         f_max=f_max,
     )
     if out is None:
-        raise ValueError("Insufficient oscillatory data to compute a Fourier spectrum.")
+        raise ValueError(
+            "Insufficient oscillatory data to compute a Fourier spectrum.")
 
     _, _, freq_band, power_band = out
-    peak_indices = _find_top_spectral_peaks(freq_band, power_band, max_peaks=3)
     fig, ax = plt.subplots(figsize=(9, 5.5))
     ax.loglog(freq_band, power_band, color="tab:blue", linewidth=1.8)
     ax.set_xlabel("Frequency")
     ax.set_ylabel("Fourier energy")
-    ax.set_title(
-        f"Lift Spectrum / Shedding Frequencies ({os.path.basename(csv_path)})",
-        fontsize=12,
-        fontweight="bold",
-    )
+    if show_title:
+        ax.set_title(
+            f"Lift Spectrum / Shedding Frequencies ({os.path.basename(csv_path)})",
+            fontsize=12,
+            fontweight="bold",
+        )
     ax.grid(True, alpha=0.3)
 
     ymax = float(np.max(power_band)) if power_band.size else 1.0
-    for rank, idx in enumerate(peak_indices, start=1):
-        f_peak = float(freq_band[idx])
-        p_peak = float(power_band[idx])
-        ax.scatter([f_peak], [p_peak], color="crimson", zorder=3)
-        label = f"#{rank}: f={f_peak:.4g}"
-        if char_length is not None and u_ref is not None and u_ref > 0.0:
-            st = f_peak * float(char_length) / float(u_ref)
-            label += f", St={st:.4g}"
-        ax.annotate(
-            label,
-            xy=(f_peak, p_peak),
-            xytext=(8, 8 + 16 * (rank - 1)),
-            textcoords="offset points",
-            fontsize=9,
-            color="crimson",
-            arrowprops={"arrowstyle": "-", "color": "crimson", "lw": 0.8},
-        )
+    if mark_peaks:
+        peak_indices = _find_top_spectral_peaks(freq_band, power_band, max_peaks=3)
+        for rank, idx in enumerate(peak_indices, start=1):
+            f_peak = float(freq_band[idx])
+            p_peak = float(power_band[idx])
+            label = f"#{rank}: f={f_peak:.4g}"
+            if char_length is not None and u_ref is not None and u_ref > 0.0:
+                st = f_peak * float(char_length) / float(u_ref)
+                label += f", St={st:.4g}"
+            ax.annotate(
+                label,
+                xy=(f_peak, p_peak),
+                xytext=(8, 8 + 16 * (rank - 1)),
+                textcoords="offset points",
+                fontsize=9,
+                color="crimson",
+                arrowprops={"arrowstyle": "-", "color": "crimson", "lw": 0.8},
+            )
 
     ax.set_xlim(float(freq_band[0]), float(freq_band[-1]))
     ax.set_ylim(
@@ -649,6 +972,77 @@ def plot_shedding_spectrum(
     fig.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"Saved figure: {save_path}")
+
+
+def plot_drag_decomposition(
+    csv_path: str,
+    save_name: str = "drag_decomposition.png",
+    t_min: Optional[float] = None,
+    results_dir: str = DEFAULT_RESULTS_DIR,
+) -> str:
+    """Plot pressure and viscous drag/lift coefficient components."""
+    plt.switch_backend("Agg")
+    arr = np.genfromtxt(csv_path, delimiter=",", names=True)
+    if arr.size == 0:
+        raise ValueError(f"No rows found in drag decomposition file: {csv_path}")
+
+    names = arr.dtype.names or ()
+    required = (
+        "t",
+        "pressure_c_d",
+        "viscous_c_d",
+        "total_c_d",
+        "pressure_c_l",
+        "viscous_c_l",
+        "total_c_l",
+    )
+    missing = [name for name in required if name not in names]
+    if missing:
+        raise ValueError(
+            f"CSV missing required columns {missing}. Found: {list(names)}"
+        )
+
+    t = np.atleast_1d(arr["t"]).astype(float)
+    mask = np.ones_like(t, dtype=bool)
+    if t_min is not None:
+        mask = t >= float(t_min)
+    if not np.any(mask):
+        raise ValueError("No drag decomposition samples left after t_min trimming.")
+
+    os.makedirs(results_dir, exist_ok=True)
+    save_path = os.path.join(results_dir, save_name)
+
+    fig, (ax_drag, ax_lift) = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
+    ax_drag.plot(t[mask], np.atleast_1d(arr["total_c_d"])[mask],
+                 color="black", linewidth=1.8, label="total")
+    ax_drag.plot(t[mask], np.atleast_1d(arr["pressure_c_d"])[mask],
+                 color="tab:blue", linewidth=1.4, label="pressure")
+    ax_drag.plot(t[mask], np.atleast_1d(arr["viscous_c_d"])[mask],
+                 color="tab:red", linewidth=1.4, label="viscous")
+    ax_drag.set_ylabel("C_d")
+    ax_drag.set_title(
+        f"Pressure/Viscous Force Decomposition ({os.path.basename(csv_path)})",
+        fontsize=12,
+        fontweight="bold",
+    )
+    ax_drag.grid(True, alpha=0.3)
+    ax_drag.legend(loc="best")
+
+    ax_lift.plot(t[mask], np.atleast_1d(arr["total_c_l"])[mask],
+                 color="black", linewidth=1.8, label="total")
+    ax_lift.plot(t[mask], np.atleast_1d(arr["pressure_c_l"])[mask],
+                 color="tab:blue", linewidth=1.4, label="pressure")
+    ax_lift.plot(t[mask], np.atleast_1d(arr["viscous_c_l"])[mask],
+                 color="tab:red", linewidth=1.4, label="viscous")
+    ax_lift.set_xlabel("time")
+    ax_lift.set_ylabel("C_l")
+    ax_lift.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved figure: {save_path}")
+    return save_path
 
 
 def save_pressure_coefficient_report(
@@ -691,7 +1085,8 @@ def save_pressure_coefficient_report(
         )
 
     if u_ref <= 0.0:
-        raise ValueError("Reference velocity must be positive for pressure coefficient.")
+        raise ValueError(
+            "Reference velocity must be positive for pressure coefficient.")
 
     force_plan = _build_surface_force_plan(xc, yc, geom, n_samples=n_samples)
     pressure_samples = _sample_surface_pressure(p, force_plan)
@@ -765,9 +1160,9 @@ def _compute_coefficients(
         return 0.0, 0.0
 
     q = 0.5 * rho * u_ref**2
-    area = char_length
-    c_d = 2.0 * f_x / (q * area) if area > 0 else 0.0
-    c_l = 2.0 * f_y / (q * area) if area > 0 else 0.0
+    projected_area = char_length
+    c_d = f_x / (q * projected_area) if projected_area > 0 else 0.0
+    c_l = f_y / (q * projected_area) if projected_area > 0 else 0.0
 
     return c_d, c_l
 
@@ -784,6 +1179,8 @@ def _extract_combined_series(
     u_ref: float,
     char_length: float,
     force_source: str = "ibm",
+    nu: Optional[float] = None,
+    surface_sample_offset_factor: float = 0.5,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Extract optional probe series and force/coefficient histories.
 
@@ -810,6 +1207,8 @@ def _extract_combined_series(
             yc=yc,
             geom=geom,
             force_source=force_source,
+            nu=nu,
+            surface_sample_offset_factor=surface_sample_offset_factor,
         )
         c_d, c_l = _compute_coefficients(f_x, f_y, u_ref, char_length)
         f_x_arr[k] = f_x
@@ -818,6 +1217,153 @@ def _extract_combined_series(
         c_l_arr[k] = c_l
 
     return t, u_probe, v_probe, p_probe, f_x_arr, f_y_arr, c_d_arr, c_l_arr
+
+
+def _compute_force_decomposition(
+    snapshot_path: str,
+    xc: np.ndarray,
+    yc: np.ndarray,
+    geom: CylinderGeometry,
+    nu: float,
+    surface_sample_offset_factor: float = 0.5,
+) -> SurfaceForceComponents:
+    """Compute pressure and viscous surface-force components from one snapshot."""
+    with np.load(snapshot_path, allow_pickle=False) as data:
+        required = {"u", "v", "p"}
+        missing = sorted(required.difference(data.files))
+        if missing:
+            available = ", ".join(sorted(data.files))
+            raise KeyError(
+                f"Snapshot {os.path.basename(snapshot_path)!r} is missing field(s) "
+                f"{missing}. Available fields: {available}"
+            )
+        u = np.array(data["u"], copy=True)
+        v = np.array(data["v"], copy=True)
+        p = np.array(data["p"], copy=True)
+        snapshot_geom = _snapshot_cylinder_geometry(data, geom)
+
+    return _compute_surface_force_components(
+        u,
+        v,
+        p,
+        xc,
+        yc,
+        snapshot_geom,
+        nu=nu,
+        sample_offset_factor=surface_sample_offset_factor,
+    )
+
+
+def _extract_force_decomposition_series(
+    snapshots: List[Tuple[float, str]],
+    nx: int,
+    ny: int,
+    geom: CylinderGeometry,
+    u_ref: float,
+    char_length: float,
+    nu: float,
+    surface_sample_offset_factor: float = 0.5,
+) -> tuple[np.ndarray, ...]:
+    """Extract pressure/viscous force and coefficient histories."""
+    xf, yf = _load_grid_faces_for_snapshot(snapshots[0][1], nx=nx, ny=ny)
+    xc = 0.5 * (xf[:-1] + xf[1:])
+    yc = 0.5 * (yf[:-1] + yf[1:])
+
+    n = len(snapshots)
+    t = np.array([time for time, _ in snapshots], dtype=float)
+    pressure_fx = np.empty(n, dtype=float)
+    pressure_fy = np.empty(n, dtype=float)
+    viscous_fx = np.empty(n, dtype=float)
+    viscous_fy = np.empty(n, dtype=float)
+    sample_spacing = np.empty(n, dtype=float)
+    sample_offset = np.empty(n, dtype=float)
+
+    for k, (_, path) in enumerate(snapshots):
+        components = _compute_force_decomposition(
+            path,
+            xc=xc,
+            yc=yc,
+            geom=geom,
+            nu=nu,
+            surface_sample_offset_factor=surface_sample_offset_factor,
+        )
+        pressure_fx[k] = components.pressure_fx
+        pressure_fy[k] = components.pressure_fy
+        viscous_fx[k] = components.viscous_fx
+        viscous_fy[k] = components.viscous_fy
+        sample_spacing[k] = components.sample_spacing
+        sample_offset[k] = components.sample_offset
+
+    total_fx = pressure_fx + viscous_fx
+    total_fy = pressure_fy + viscous_fy
+    pressure_cd, pressure_cl = _compute_coefficients(
+        pressure_fx, pressure_fy, u_ref, char_length
+    )
+    viscous_cd, viscous_cl = _compute_coefficients(
+        viscous_fx, viscous_fy, u_ref, char_length
+    )
+    total_cd, total_cl = _compute_coefficients(
+        total_fx, total_fy, u_ref, char_length
+    )
+
+    return (
+        t,
+        pressure_fx,
+        pressure_fy,
+        viscous_fx,
+        viscous_fy,
+        total_fx,
+        total_fy,
+        pressure_cd,
+        pressure_cl,
+        viscous_cd,
+        viscous_cl,
+        total_cd,
+        total_cl,
+        sample_spacing,
+        sample_offset,
+    )
+
+
+def _drop_final_endpoint_sample(
+    *arrays: np.ndarray,
+) -> tuple[np.ndarray, ...]:
+    """Drop the final saved endpoint sample, which is often a restart artifact."""
+    if not arrays or len(arrays[0]) <= 1:
+        return arrays
+    return tuple(arr[:-1] for arr in arrays)
+
+
+def _coefficient_window_stats(
+    t: np.ndarray,
+    c_d: np.ndarray,
+    c_l: np.ndarray,
+    start: float,
+) -> Optional[dict[str, float]]:
+    mask = t >= start
+    if not np.any(mask):
+        return None
+    t_window = t[mask]
+    c_d_window = c_d[mask]
+    c_l_window = c_l[mask]
+    c_l_min = float(np.min(c_l_window))
+    c_l_max = float(np.max(c_l_window))
+    return {
+        "start": float(start),
+        "t_min": float(t_window.min()),
+        "t_max": float(t_window.max()),
+        "c_d_mean": float(np.mean(c_d_window)),
+        "c_d_std": float(np.std(c_d_window)),
+        "c_d_min": float(np.min(c_d_window)),
+        "c_d_max": float(np.max(c_d_window)),
+        "c_l_mean": float(np.mean(c_l_window)),
+        "c_l_std": float(np.std(c_l_window)),
+        "c_l_rms": float(np.sqrt(np.mean(c_l_window**2))),
+        "c_l_min": c_l_min,
+        "c_l_max": c_l_max,
+        "c_l_abs_max": float(np.max(np.abs(c_l_window))),
+        "c_l_amp_half_range": 0.5 * (c_l_max - c_l_min),
+    }
 
 
 def parse_args() -> argparse.Namespace:
@@ -844,15 +1390,33 @@ def parse_args() -> argparse.Namespace:
                         help="Use L = 2*cylinder_radius from config (or ly/4 if radius is default)")
     parser.add_argument("--cylinder-radius", type=float, default=None,
                         help="Cylinder radius (default: read from config or ly/8)")
-    parser.add_argument("--force-source", choices=("ibm", "pressure"), default="ibm",
+    parser.add_argument("--force-source", choices=("auto", "ibm", "pressure", "surface", "surface-full"), default="auto",
                         help=(
-                            "Force source: ibm uses saved direct-forcing metadata "
-                            "(default); pressure integrates pressure around the "
-                            "per-snapshot cylinder surface"
+                            "Force source: auto prefers physical surface-full "
+                            "integration when velocity/pressure fields are available "
+                            "(default); ibm uses saved direct-forcing metadata; "
+                            "pressure integrates pressure only around "
+                            "the per-snapshot cylinder surface; surface integrates "
+                            "experimental viscous surface stress only; surface-full "
+                            "uses pressure plus viscous surface stress"
+                        ))
+    parser.add_argument("--surface-sample-offset-factor", type=float, default=0.5,
+                        help=(
+                            "Surface-force contour offset in local grid spacings "
+                            "(default: 0.5)"
                         ))
 
     parser.add_argument("--t-min", type=float, default=1.0,
                         help="Ignore data before this time for frequency fit (default: 1.0)")
+    parser.add_argument("--stats-t-min", type=float, default=None,
+                        help=(
+                            "Ignore data before this time for settled drag/lift "
+                            "statistics. Values between 0 and 1 are interpreted "
+                            "as a fraction of the saved time span; 0.70 means "
+                            "use the last 30%%. Default: no extra settled section."
+                        ))
+    parser.add_argument("--keep-final-sample", action="store_true",
+                        help="Keep the final endpoint sample in CSV/statistics")
     parser.add_argument("--f-min", type=float, default=0.05,
                         help="Min search frequency (default: 0.05)")
     parser.add_argument("--f-max", type=float, default=2.0,
@@ -860,6 +1424,11 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--save-series", type=str, default=None,
                         help="Optional CSV path for combined time series")
+    parser.add_argument("--save-drag-decomposition", type=str, default=None,
+                        help=(
+                            "Optional CSV path for pressure/viscous force and "
+                            "coefficient components"
+                        ))
     parser.add_argument("--save-report", type=str,
                         default=os.path.join(
                             DEFAULT_RESULTS_DIR, "aero_report.txt"),
@@ -882,10 +1451,18 @@ def run_analysis(
     f_min: float = 0.05,
     f_max: float = 2.0,
     save_series: Optional[str] = None,
-    save_report: Optional[str] = os.path.join(DEFAULT_RESULTS_DIR, "aero_report.txt"),
-    force_source: str = "ibm",
+    save_drag_decomposition: Optional[str] = None,
+    save_report: Optional[str] = os.path.join(
+        DEFAULT_RESULTS_DIR, "aero_report.txt"),
+    force_source: str = "auto",
+    drop_final_sample: bool = True,
+    surface_sample_offset_factor: float = 0.5,
+    stats_t_min: Optional[float] = None,
 ) -> int:
     """Run aerodynamic post-processing programmatically."""
+    global _LAST_SURFACE_DIAGNOSTICS
+    _LAST_SURFACE_DIAGNOSTICS = None
+
     snapshots = _collect_snapshots(indir, pattern)
     if not snapshots:
         print(f"No snapshots found in {indir!r} with pattern {pattern!r}.")
@@ -903,6 +1480,8 @@ def run_analysis(
         print("No valid snapshots remain after filtering incomplete files.")
         return 1
 
+    force_source = _resolve_force_source(force_source, snapshots)
+
     l_char, u_ref, nx, ny, lx, ly = _estimate_scales(
         snapshots[0][1],
         length_scale=length_scale,
@@ -916,7 +1495,15 @@ def run_analysis(
         config_path=config,
         cylinder_radius=cylinder_radius,
     )
-
+    nu = None
+    if force_source in {"surface", "surface-full"}:
+        nu = _estimate_kinematic_viscosity(
+            snapshots[0][1],
+            config,
+            u_ref=u_ref,
+            geom=geom,
+            char_length=l_char,
+        )
     t, u_probe, v_probe, p_probe, f_x, f_y, c_d, c_l = _extract_combined_series(
         snapshots,
         nx=nx,
@@ -929,17 +1516,114 @@ def run_analysis(
         u_ref=u_ref,
         char_length=l_char,
         force_source=force_source,
+        nu=nu,
+        surface_sample_offset_factor=surface_sample_offset_factor,
     )
+    raw_sample_count = len(t)
+    if drop_final_sample:
+        t, u_probe, v_probe, p_probe, f_x, f_y, c_d, c_l = _drop_final_endpoint_sample(
+            t, u_probe, v_probe, p_probe, f_x, f_y, c_d, c_l
+        )
+        if len(t) == 0:
+            print("No samples remain after dropping the final endpoint sample.")
+            return 1
 
     if save_series:
-        out = np.column_stack((t, u_probe, v_probe, p_probe, f_x, f_y, c_d, c_l))
+        out = np.column_stack(
+            (t, u_probe, v_probe, p_probe, f_x, f_y, c_d, c_l))
         header = "t,u_probe,v_probe,p_probe,f_x,f_y,c_d,c_l"
         np.savetxt(save_series, out, delimiter=",", header=header, comments="")
         print(f"Saved combined series: {save_series}")
 
+    drag_decomposition_stats = None
+    if save_drag_decomposition:
+        if force_source not in {"surface", "surface-full"}:
+            raise ValueError(
+                "Drag decomposition requires surface-force post-processing "
+                "with velocity and pressure snapshots."
+            )
+        if nu is None:
+            raise ValueError("Drag decomposition requires a kinematic viscosity.")
+        decomposition = _extract_force_decomposition_series(
+            snapshots,
+            nx=nx,
+            ny=ny,
+            geom=geom,
+            u_ref=u_ref,
+            char_length=l_char,
+            nu=nu,
+            surface_sample_offset_factor=surface_sample_offset_factor,
+        )
+        if drop_final_sample:
+            decomposition = _drop_final_endpoint_sample(*decomposition)
+
+        (
+            t_decomp,
+            pressure_fx,
+            pressure_fy,
+            viscous_fx,
+            viscous_fy,
+            total_fx,
+            total_fy,
+            pressure_cd,
+            pressure_cl,
+            viscous_cd,
+            viscous_cl,
+            total_cd,
+            total_cl,
+            sample_spacing,
+            sample_offset,
+        ) = decomposition
+        out = np.column_stack(
+            (
+                t_decomp,
+                pressure_fx,
+                pressure_fy,
+                viscous_fx,
+                viscous_fy,
+                total_fx,
+                total_fy,
+                pressure_cd,
+                pressure_cl,
+                viscous_cd,
+                viscous_cl,
+                total_cd,
+                total_cl,
+                sample_spacing,
+                sample_offset,
+            )
+        )
+        header = (
+            "t,pressure_fx,pressure_fy,viscous_fx,viscous_fy,"
+            "total_fx,total_fy,pressure_c_d,pressure_c_l,"
+            "viscous_c_d,viscous_c_l,total_c_d,total_c_l,"
+            "sample_spacing,sample_offset"
+        )
+        decomp_dir = os.path.dirname(save_drag_decomposition)
+        if decomp_dir:
+            os.makedirs(decomp_dir, exist_ok=True)
+        np.savetxt(
+            save_drag_decomposition,
+            out,
+            delimiter=",",
+            header=header,
+            comments="",
+        )
+        drag_decomposition_stats = {
+            "pressure_c_d_mean": float(np.mean(pressure_cd)),
+            "viscous_c_d_mean": float(np.mean(viscous_cd)),
+            "total_c_d_mean": float(np.mean(total_cd)),
+            "pressure_c_d_min": float(np.min(pressure_cd)),
+            "pressure_c_d_max": float(np.max(pressure_cd)),
+            "viscous_c_d_min": float(np.min(viscous_cd)),
+            "viscous_c_d_max": float(np.max(viscous_cd)),
+        }
+        print(f"Saved drag decomposition: {save_drag_decomposition}")
+
     dt = np.diff(t)
     dt_median = float(np.median(dt)) if dt.size else np.nan
-    nyquist_est = 0.5 / dt_median if np.isfinite(dt_median) and dt_median > 0 else np.nan
+    nyquist_est = 0.5 / \
+        dt_median if np.isfinite(dt_median) and dt_median > 0 else np.nan
 
     lift_strouhal: Optional[SpectralResult] = None
     out = _dominant_frequency(
@@ -957,22 +1641,82 @@ def run_analysis(
             st=f_peak * l_char / u_ref,
         )
 
-    c_d_mean = float(np.mean(c_d))
-    c_d_std = float(np.std(c_d))
-    c_l_mean = float(np.mean(c_l))
-    c_l_std = float(np.std(c_l))
-    c_l_rms = float(np.sqrt(np.mean(c_l**2)))
+    primary_stats = _coefficient_window_stats(t, c_d, c_l, t_min)
+    if primary_stats is None:
+        print(
+            f"No samples at or after t_min={t_min:.6g}; "
+            "cannot compute coefficient statistics."
+        )
+        return 1
+    def _resolve_stats_start(raw_start: float) -> float:
+        value = float(raw_start)
+        if 0.0 < value < 1.0:
+            return float(t.min() + value * (t.max() - t.min()))
+        return value
+
+    settled_stats = None
+    settled_stats_start = None
+    if stats_t_min is not None:
+        settled_stats_start = _resolve_stats_start(float(stats_t_min))
+        if not np.isclose(settled_stats_start, float(t_min)):
+            settled_stats = _coefficient_window_stats(t, c_d, c_l, settled_stats_start)
+
+    def _print_stats(stats: dict[str, float]) -> None:
+        print(f"Stats window      : [{stats['t_min']:.4f}, {stats['t_max']:.4f}]")
+        print(f"C_d mean          : {stats['c_d_mean']:.6g}")
+        print(f"C_d range         : [{stats['c_d_min']:.6g}, {stats['c_d_max']:.6g}]")
+        print(f"C_l mean          : {stats['c_l_mean']:.6g}")
+        print(f"C_l rms           : {stats['c_l_rms']:.6g}")
+        print(f"C_l range         : [{stats['c_l_min']:.6g}, {stats['c_l_max']:.6g}]")
+
+    def _stats_lines(stats: dict[str, float]) -> List[str]:
+        return [
+            f"Stats window      : [{stats['t_min']:.4f}, {stats['t_max']:.4f}]",
+            f"C_d mean          : {stats['c_d_mean']:.6g}",
+            f"C_d range         : [{stats['c_d_min']:.6g}, {stats['c_d_max']:.6g}]",
+            f"C_l mean          : {stats['c_l_mean']:.6g}",
+            f"C_l rms           : {stats['c_l_rms']:.6g}",
+            f"C_l range         : [{stats['c_l_min']:.6g}, {stats['c_l_max']:.6g}]",
+        ]
 
     print("=" * 70)
     print("COMPREHENSIVE AERODYNAMIC ANALYSIS")
     print("=" * 70)
     print(f"Snapshots         : {len(snapshots)}")
+    if drop_final_sample and raw_sample_count != len(t):
+        print("Endpoint trim     : dropped final sample")
     print(f"Time span         : [{t.min():.4f}, {t.max():.4f}]")
     if probe_x is not None and probe_y is not None:
         print(f"Probe location    : ({probe_x:.6g}, {probe_y:.6g})")
     print(f"Cylinder center   : ({geom.center_x:.6g}, {geom.center_y:.6g})")
     print(f"Cylinder radius   : {geom.radius:.6g}")
     print(f"Force source      : {force_source}")
+    if nu is not None:
+        print(f"Kinematic visc.   : {nu:.6g}")
+        if _LAST_SURFACE_DIAGNOSTICS is not None:
+            print(
+                "Pressure sample   : "
+                f"Cp=[{_LAST_SURFACE_DIAGNOSTICS.pressure_cp_min:.6g}, "
+                f"{_LAST_SURFACE_DIAGNOSTICS.pressure_cp_max:.6g}], "
+                f"pressure-only Cd={_LAST_SURFACE_DIAGNOSTICS.pressure_cd:.6g}"
+            )
+            print(
+                "Surface contour   : "
+                f"h={_LAST_SURFACE_DIAGNOSTICS.sample_spacing:.6g}, "
+                f"offset={_LAST_SURFACE_DIAGNOSTICS.sample_offset:.6g}"
+            )
+            if max(
+                abs(_LAST_SURFACE_DIAGNOSTICS.pressure_cp_min),
+                abs(_LAST_SURFACE_DIAGNOSTICS.pressure_cp_max),
+            ) > 100.0:
+                print("WARNING          : surface pressure samples are not physical.")
+    if drag_decomposition_stats is not None:
+        print(
+            "Drag decomposition: "
+            f"C_d,p={drag_decomposition_stats['pressure_c_d_mean']:.6g}, "
+            f"C_d,v={drag_decomposition_stats['viscous_c_d_mean']:.6g}, "
+            f"C_d,total={drag_decomposition_stats['total_c_d_mean']:.6g}"
+        )
     print(f"Char. length (L)  : {l_char:.6g}")
     print(f"Ref. velocity (U) : {u_ref:.6g}")
     print()
@@ -982,16 +1726,17 @@ def run_analysis(
     print("Signal used       : C_l")
     print(f"Frequency window  : [{f_min:.4f}, {f_max:.4f}]")
     if np.isfinite(nyquist_est):
-        print(f"Median dt         : {dt_median:.6g} (Nyquist approx {nyquist_est:.6g})")
+        print(
+            f"Median dt         : {dt_median:.6g} (Nyquist approx {nyquist_est:.6g})")
 
     if lift_strouhal is None:
-        print("C_l peak         : unavailable (insufficient variation/samples)")
+        print("C_l spectral peak: unavailable (insufficient variation/samples)")
     else:
         edge_note = ""
         if _is_edge_frequency(lift_strouhal.freq, f_min, f_max):
             edge_note = " [edge]"
         print(
-            f"C_l peak         : f={lift_strouhal.freq:.6g}, "
+            f"C_l spectral peak: f={lift_strouhal.freq:.6g}, "
             f"St={lift_strouhal.st:.6g}, "
             f"power={lift_strouhal.peak_power:.6g}{edge_note}"
         )
@@ -1006,11 +1751,15 @@ def run_analysis(
     print("-" * 70)
     print("DRAG AND LIFT COEFFICIENT ANALYSIS")
     print("-" * 70)
-    print(f"C_d mean          : {c_d_mean:.6g}")
-    print(f"C_d std           : {c_d_std:.6g}")
-    print(f"C_l mean          : {c_l_mean:.6g}")
-    print(f"C_l std           : {c_l_std:.6g}")
-    print(f"C_l rms           : {c_l_rms:.6g}")
+    _print_stats(primary_stats)
+    if settled_stats is not None:
+        print()
+        print("-" * 70)
+        print("SETTLED COEFFICIENT STATISTICS")
+        print("-" * 70)
+        _print_stats(settled_stats)
+    elif settled_stats_start is not None:
+        print(f"Settled stats     : unavailable for t >= {settled_stats_start:.6g}")
 
     if save_report:
         report_dir = os.path.dirname(save_report)
@@ -1021,10 +1770,53 @@ def run_analysis(
             "COMPREHENSIVE AERODYNAMIC ANALYSIS",
             "=" * 70,
             f"Snapshots         : {len(snapshots)}",
+            (
+                "Endpoint trim     : dropped final sample"
+                if drop_final_sample and raw_sample_count != len(t)
+                else "Endpoint trim     : none"
+            ),
             f"Time span         : [{t.min():.4f}, {t.max():.4f}]",
             f"Cylinder center   : ({geom.center_x:.6g}, {geom.center_y:.6g})",
             f"Cylinder radius   : {geom.radius:.6g}",
             f"Force source      : {force_source}",
+            *( [f"Kinematic visc.   : {nu:.6g}"] if nu is not None else [] ),
+            *(
+                [
+                    "Pressure sample   : "
+                    f"Cp=[{_LAST_SURFACE_DIAGNOSTICS.pressure_cp_min:.6g}, "
+                    f"{_LAST_SURFACE_DIAGNOSTICS.pressure_cp_max:.6g}], "
+                    f"pressure-only Cd={_LAST_SURFACE_DIAGNOSTICS.pressure_cd:.6g}",
+                    "Surface contour   : "
+                    f"h={_LAST_SURFACE_DIAGNOSTICS.sample_spacing:.6g}, "
+                    f"offset={_LAST_SURFACE_DIAGNOSTICS.sample_offset:.6g}",
+                    (
+                        "WARNING          : surface pressure samples are not physical."
+                        if max(
+                            abs(_LAST_SURFACE_DIAGNOSTICS.pressure_cp_min),
+                            abs(_LAST_SURFACE_DIAGNOSTICS.pressure_cp_max),
+                        )
+                        > 100.0
+                        else "WARNING          : none"
+                    ),
+                ]
+                if nu is not None and _LAST_SURFACE_DIAGNOSTICS is not None
+                else []
+            ),
+            *(
+                [
+                    "Drag decomposition: "
+                    f"C_d,p={drag_decomposition_stats['pressure_c_d_mean']:.6g}, "
+                    f"C_d,v={drag_decomposition_stats['viscous_c_d_mean']:.6g}, "
+                    f"C_d,total={drag_decomposition_stats['total_c_d_mean']:.6g}",
+                    "Drag decomp. range: "
+                    f"C_d,p=[{drag_decomposition_stats['pressure_c_d_min']:.6g}, "
+                    f"{drag_decomposition_stats['pressure_c_d_max']:.6g}], "
+                    f"C_d,v=[{drag_decomposition_stats['viscous_c_d_min']:.6g}, "
+                    f"{drag_decomposition_stats['viscous_c_d_max']:.6g}]",
+                ]
+                if drag_decomposition_stats is not None
+                else []
+            ),
             f"Char. length (L)  : {l_char:.6g}",
             f"Ref. velocity (U) : {u_ref:.6g}",
             "",
@@ -1036,7 +1828,8 @@ def run_analysis(
         ]
 
         if probe_x is not None and probe_y is not None:
-            lines.insert(4, f"Probe location    : ({probe_x:.6g}, {probe_y:.6g})")
+            lines.insert(
+                4, f"Probe location    : ({probe_x:.6g}, {probe_y:.6g})")
 
         if np.isfinite(nyquist_est):
             lines.append(
@@ -1045,13 +1838,14 @@ def run_analysis(
             )
 
         if lift_strouhal is None:
-            lines.append("C_l peak         : unavailable (insufficient variation/samples)")
+            lines.append(
+                "C_l spectral peak: unavailable (insufficient variation/samples)")
         else:
             edge_note = ""
             if _is_edge_frequency(lift_strouhal.freq, f_min, f_max):
                 edge_note = " [edge]"
             lines.append(
-                f"C_l peak         : f={lift_strouhal.freq:.6g}, "
+                f"C_l spectral peak: f={lift_strouhal.freq:.6g}, "
                 f"St={lift_strouhal.st:.6g}, "
                 f"power={lift_strouhal.peak_power:.6g}{edge_note}"
             )
@@ -1064,12 +1858,20 @@ def run_analysis(
             "-" * 70,
             "DRAG AND LIFT COEFFICIENT ANALYSIS",
             "-" * 70,
-            f"C_d mean          : {c_d_mean:.6g}",
-            f"C_d std           : {c_d_std:.6g}",
-            f"C_l mean          : {c_l_mean:.6g}",
-            f"C_l std           : {c_l_std:.6g}",
-            f"C_l rms           : {c_l_rms:.6g}",
+            *_stats_lines(primary_stats),
         ])
+        if settled_stats is not None:
+            lines.extend([
+                "",
+                "-" * 70,
+                "SETTLED COEFFICIENT STATISTICS",
+                "-" * 70,
+                *_stats_lines(settled_stats),
+            ])
+        elif settled_stats_start is not None:
+            lines.append(
+                f"Settled stats     : unavailable for t >= {settled_stats_start:.6g}"
+            )
 
         with open(save_report, "w", encoding="utf-8") as fout:
             fout.write("\n".join(lines) + "\n")
@@ -1095,8 +1897,12 @@ def main() -> int:
         f_min=args.f_min,
         f_max=args.f_max,
         save_series=args.save_series,
+        save_drag_decomposition=args.save_drag_decomposition,
         save_report=args.save_report,
         force_source=args.force_source,
+        drop_final_sample=not args.keep_final_sample,
+        surface_sample_offset_factor=args.surface_sample_offset_factor,
+        stats_t_min=args.stats_t_min,
     )
 
 

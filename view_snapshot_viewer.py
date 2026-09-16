@@ -173,6 +173,17 @@ def load_coeff_series(path: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     return t, c_d, c_l
 
 
+def drop_final_endpoint_sample(
+    t: np.ndarray,
+    c_d: np.ndarray,
+    c_l: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Drop the final saved endpoint sample, which can contain a force artifact."""
+    if len(t) <= 1:
+        return t, c_d, c_l
+    return t[:-1], c_d[:-1], c_l[:-1]
+
+
 def _derive_oscillation_save_name(save_name: str) -> str:
     """Append an oscillation-only suffix before file extension."""
     root, ext = os.path.splitext(save_name)
@@ -271,7 +282,10 @@ def detect_startup_trim_index(
         return 0
 
     if coeff_t_min is not None:
-        return int(np.searchsorted(t, coeff_t_min, side="left"))
+        t_start = float(coeff_t_min)
+        if 0.0 < t_start < 1.0 and t.size > 1:
+            t_start = float(t[0]) + t_start * float(t[-1] - t[0])
+        return int(np.searchsorted(t, t_start, side="left"))
 
     # Auto-trim a single extreme startup point if it is a clear outlier.
     n = len(t)
@@ -290,7 +304,7 @@ def detect_startup_trim_index(
     return 1 if max(cd_z, cl_z) >= 8.0 else 0
 
 
-def detect_tail_fraction_start_index(t: np.ndarray, fraction: float = 0.2) -> int:
+def detect_tail_fraction_start_index(t: np.ndarray, fraction: float = 0.3) -> int:
     """Return index corresponding to the final `fraction` of the time span."""
     if t.size == 0:
         return 0
@@ -302,13 +316,25 @@ def detect_tail_fraction_start_index(t: np.ndarray, fraction: float = 0.2) -> in
     return int(np.searchsorted(t, t_start, side="left"))
 
 
+def resolve_window_start_time(t: np.ndarray, start: float) -> float:
+    """Resolve an absolute start time, or a run fraction for values in (0, 1)."""
+    t_start = float(start)
+    if 0.0 < t_start < 1.0 and t.size > 1:
+        return float(t[0]) + t_start * float(t[-1] - t[0])
+    return t_start
+
+
 def plot_coeff_history(
     csv_path: str,
     save_name: Optional[str] = None,
     coeff_t_min: Optional[float] = None,
+    settled_coeff_t_min: Optional[float] = None,
+    drop_final_sample: bool = False,
 ) -> None:
     """Plot drag and lift coefficients as functions of time."""
     t, c_d, c_l = load_coeff_series(csv_path)
+    if drop_final_sample:
+        t, c_d, c_l = drop_final_endpoint_sample(t, c_d, c_l)
     i_plot_start = detect_startup_trim_index(
         t, c_d, c_l, coeff_t_min=coeff_t_min)
     if i_plot_start >= len(t):
@@ -317,8 +343,6 @@ def plot_coeff_history(
     t_plot = t[i_plot_start:]
     c_d_plot = c_d[i_plot_start:]
     c_l_plot = c_l[i_plot_start:]
-
-    i_start = detect_tail_fraction_start_index(t, fraction=0.2)
 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(9, 7), sharex=True)
     ax1.plot(t_plot, c_d_plot, color="tab:blue", linewidth=1.6)
@@ -342,13 +366,25 @@ def plot_coeff_history(
     else:
         plt.show()
 
-    # Also create oscillation-only view from the last 20% of the time range.
+    # Also create a settled-window view. By default this preserves the
+    # historical last-30% behavior; callers can align it with settled stats.
+    if settled_coeff_t_min is None:
+        i_start = detect_tail_fraction_start_index(t, fraction=0.3)
+        settled_title = "Last 30% Time Window"
+    else:
+        t_start = resolve_window_start_time(t, float(settled_coeff_t_min))
+        i_start = int(np.searchsorted(t, t_start, side="left"))
+        settled_title = f"Settled Window t >= {t_start:.4g}"
+
     i_start = max(i_start, i_plot_start)
+    if i_start >= len(t):
+        raise ValueError("No coefficient samples left in settled window.")
+
     fig2, (ax3, ax4) = plt.subplots(2, 1, figsize=(9, 7), sharex=True)
     ax3.plot(t[i_start:], c_d[i_start:], color="tab:blue", linewidth=1.6)
     ax3.set_ylabel("C_d")
     ax3.set_title(
-        f"Drag/Lift Coefficients (Last 20% Time Window) ({os.path.basename(csv_path)})",
+        f"Drag/Lift Coefficients ({settled_title}) ({os.path.basename(csv_path)})",
         fontsize=12,
         fontweight="bold",
     )
@@ -764,6 +800,13 @@ def main(argv=None):
     parser.add_argument("--coeff-t-min", type=float, default=0.5,
                         help="minimum time for coefficient plots (default: 0.5)"
                         )
+    parser.add_argument("--settled-coeff-t-min", type=float, default=None,
+                        help=(
+                            "minimum time for the settled coefficient plot; "
+                            "values between 0 and 1 are run fractions"
+                        ))
+    parser.add_argument("--drop-final-sample", action="store_true",
+                        help="drop the final endpoint sample in coefficient plots")
     parser.add_argument("--snapshot-dir", type=str, default="output",
                         help="directory searched for snap_*.npz when building a vorticity video")
     parser.add_argument("--config", type=str, default="config.txt",
@@ -792,7 +835,9 @@ def main(argv=None):
             sys.exit(7)
         try:
             plot_coeff_history(coeff_path, args.save,
-                               coeff_t_min=args.coeff_t_min)
+                               coeff_t_min=args.coeff_t_min,
+                               settled_coeff_t_min=args.settled_coeff_t_min,
+                               drop_final_sample=args.drop_final_sample)
         except Exception as e:
             print(f"Error plotting coefficients: {e}", file=sys.stderr)
             sys.exit(8)

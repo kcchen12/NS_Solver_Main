@@ -213,9 +213,6 @@ def plot_time_averaged_fields(
         p_mean = np.asarray(data["p_mean"], dtype=float)
         u_rms = np.asarray(data["u_rms"], dtype=float)
         v_rms = np.asarray(data["v_rms"], dtype=float)
-        t_start = float(data["t_start"])
-        t_end = float(data["t_end"])
-        n_snapshots = int(data["n_snapshots"])
 
     dx = float(xc[1] - xc[0]) if xc.size > 1 else 1.0
     dy = float(yc[1] - yc[0]) if yc.size > 1 else 1.0
@@ -238,11 +235,11 @@ def plot_time_averaged_fields(
         ("v RMS", v_rms, "magma"),
     ]
 
-    for ax, (title, field, cmap) in zip(axes.flat, panels):
-        if title == "Mean u":
+    for ax, (label, field, cmap) in zip(axes.flat, panels):
+        if label == "Mean u":
             vmax = max(float(np.percentile(np.abs(field), 99.0)), 1e-12)
             vmin = -vmax
-        elif title == "Mean p":
+        elif label == "Mean p":
             vmax = max(float(np.percentile(np.abs(field), 99.0)), 1e-12)
             vmin = -vmax
         else:
@@ -257,20 +254,13 @@ def plot_time_averaged_fields(
             vmax=vmax,
             aspect=aspect,
         )
-        ax.set_title(title, fontsize=11, fontweight="bold")
         ax.set_xlabel("x")
         ax.set_ylabel("y")
-        fig.colorbar(im, ax=ax, shrink=0.86)
+        colorbar = fig.colorbar(im, ax=ax, shrink=0.86)
+        colorbar.set_label(label)
 
     for ax in axes.flat[len(panels):]:
         ax.axis("off")
-
-    fig.suptitle(
-        f"Time-Averaged Fields, t in [{t_start:.4f}, {t_end:.4f}], "
-        f"N={n_snapshots}",
-        fontsize=13,
-        fontweight="bold",
-    )
 
     os.makedirs(results_dir, exist_ok=True)
     save_path = os.path.join(results_dir, save_name)

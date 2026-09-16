@@ -48,6 +48,7 @@ from src.solver import FractionalStepSolver
 from src.ibm import ImmersedBoundary
 from src.io_utils import (
     save_snapshot,
+    load_snapshot,
     save_grid_metadata,
     save_grid_metadata_dict,
     load_prepared_grid,
@@ -57,6 +58,7 @@ from src.parallel import ParallelDecomposition
 from src.config import ConfigParser
 from analyze_aerodynamics import (
     run_analysis as run_aero_analysis,
+    plot_drag_decomposition,
     plot_shedding_spectrum,
     save_pressure_coefficient_report,
 )
@@ -122,18 +124,33 @@ def _normalize_ibm_shape(raw_value: str | None) -> str:
     value = "circle" if raw_value is None else str(raw_value).strip().lower()
     aliases = {
         "cylinder": "circle",
+        "square-cylinder": "square",
+        "square_cylinder": "square",
+        "square-bluff-body": "square",
+        "square_bluff_body": "square",
+        "airfoil": "airfoil",
+        "naca": "airfoil",
+        "naca0012": "airfoil",
+        "naca-0012": "airfoil",
         "circle_top_indent": "circle-with-top-indent",
         "circle-with-indent": "circle-with-top-indent",
         "indented-circle": "circle-with-top-indent",
     }
     value = aliases.get(value, value)
-    return value if value in {"circle", "circle-with-top-indent"} else "circle"
+    return value if value in {"circle", "circle-with-top-indent", "square", "airfoil"} else "circle"
 
 
 def _normalize_cylinder_geometry_mode(raw_value: str | None) -> str:
     value = "circle" if raw_value is None else str(raw_value).strip().lower()
     aliases = {
         "ibm-circle": "circle",
+        "square-cylinder": "square",
+        "square_cylinder": "square",
+        "square-bluff-body": "square",
+        "square_bluff_body": "square",
+        "naca": "airfoil",
+        "naca0012": "airfoil",
+        "naca-0012": "airfoil",
         "indented-circle": "circle-with-top-indent",
         "rectangular-top-indent": "circle-with-top-indent",
     }
@@ -141,14 +158,135 @@ def _normalize_cylinder_geometry_mode(raw_value: str | None) -> str:
 
 
 def _normalize_cylinder_experiment_mode(raw_value: str | None) -> str:
-    value = "none" if raw_value is None else str(raw_value).strip().lower()
+    value = "circle" if raw_value is None else str(raw_value).strip().lower()
     aliases = {
-        "off": "none",
+        "none": "circle",
+        "off": "circle",
+        "cylinder": "circle",
         "indent": "top-indent",
         "rectangular-indent": "top-indent",
+        "square-cylinder": "square",
+        "square_cylinder": "square",
+        "square-bluff-body": "square",
+        "square_bluff_body": "square",
+        "naca": "airfoil",
+        "naca0012": "airfoil",
+        "naca-0012": "airfoil",
     }
     value = aliases.get(value, value)
-    return value if value in {"none", "top-indent"} else "none"
+    return value if value in {"circle", "top-indent", "square", "airfoil"} else "circle"
+
+
+def _experimental_default(exp_cfg: ConfigParser, enabled: bool, key: str, default, dtype):
+    if not enabled:
+        return default
+    return exp_cfg.get(key, default, dtype)
+
+
+def _truncate_grid_metadata_y(metadata: dict, trim_cells: int) -> dict:
+    """Return grid metadata with bottom/top y cells removed."""
+    trim_cells = int(trim_cells)
+    if trim_cells <= 0:
+        return metadata
+
+    yf = np.asarray(metadata["yf"], dtype=float)
+    ny = int(metadata["ny"])
+    if ny <= 2 * trim_cells:
+        raise ValueError(
+            f"Cannot truncate {trim_cells} y cells from both ends of ny={ny}"
+        )
+
+    trimmed_yf = yf[trim_cells:-trim_cells]
+    grid = CartesianGrid(
+        nx=int(metadata["nx"]),
+        ny=int(trimmed_yf.size - 1),
+        nz=int(metadata.get("nz", 1)),
+        lx=float(metadata["lx"]),
+        ly=float(trimmed_yf[-1] - trimmed_yf[0]),
+        lz=float(metadata.get("lz", 1.0)),
+        x_min=float(metadata.get("x_min", 0.0)),
+        y_min=float(trimmed_yf[0]),
+        z_min=float(metadata.get("z_min", 0.0)),
+        xf=np.asarray(metadata["xf"], dtype=float),
+        yf=trimmed_yf,
+        zf=np.asarray(metadata["zf"], dtype=float) if "zf" in metadata else None,
+    )
+    truncated = grid.to_metadata()
+    for key in (
+        "grid_type",
+        "beta_x",
+        "beta_y",
+        "nonuniform_mode",
+        "uniform_x_start",
+        "uniform_x_end",
+        "uniform_y_start",
+        "uniform_y_end",
+        "band_start_x",
+        "band_end_x",
+        "band_start_y",
+        "band_end_y",
+    ):
+        if key in metadata:
+            truncated[key] = metadata[key]
+    truncated["y_truncation_cells_each_end"] = trim_cells
+    truncated["source_ny_before_y_truncation"] = ny
+    truncated["source_y_min_before_y_truncation"] = float(metadata["y_min"])
+    truncated["source_y_max_before_y_truncation"] = float(metadata["y_max"])
+    truncated["dx"] = grid.dx_cells.copy()
+    truncated["dy"] = grid.dy_cells.copy()
+    return truncated
+
+
+def _apply_y_truncation_to_args(args, parser) -> None:
+    trim_cells = int(getattr(args, "truncate_y_cells", 0))
+    args.y_truncation_enabled = False
+    args.y_truncation_cells_each_end = 0
+    args.source_ny_before_y_truncation = args.ny
+    args.source_y_min_before_y_truncation = args.y_min
+    args.source_y_max_before_y_truncation = args.y_max
+    args.source_ly_before_y_truncation = args.ly
+
+    if trim_cells < 0:
+        parser.error("--truncate-y-cells must be non-negative")
+    if trim_cells == 0:
+        return
+    if args.ny <= 2 * trim_cells:
+        parser.error(
+            f"--truncate-y-cells={trim_cells} requires ny > {2 * trim_cells}"
+        )
+
+    args.y_truncation_enabled = True
+    args.y_truncation_cells_each_end = trim_cells
+    args.source_ny_before_y_truncation = args.ny
+    args.source_y_min_before_y_truncation = args.y_min
+    args.source_y_max_before_y_truncation = args.y_max
+    args.source_ly_before_y_truncation = args.ly
+
+    if args.grid_type == "nonuniform":
+        metadata = build_nonuniform_grid_metadata(
+            nx=args.nx,
+            ny=args.ny,
+            lx=args.lx,
+            ly=args.ly,
+            beta_x=args.beta_x,
+            beta_y=args.beta_y,
+            x_min=args.x_min,
+            y_min=args.y_min,
+            uniform_x_start=args.uniform_x_start,
+            uniform_x_end=args.uniform_x_end,
+            uniform_y_start=args.uniform_y_start,
+            uniform_y_end=args.uniform_y_end,
+        )
+        truncated = _truncate_grid_metadata_y(metadata, trim_cells)
+        args._truncated_yf = np.asarray(truncated["yf"], dtype=float)
+    else:
+        yf = np.linspace(args.y_min, args.y_max, args.ny + 1)
+        args._truncated_yf = yf[trim_cells:-trim_cells]
+
+    args.ny = int(args._truncated_yf.size - 1)
+    args.y_min = float(args._truncated_yf[0])
+    args.y_max = float(args._truncated_yf[-1])
+    args.ly = float(args.y_max - args.y_min)
 
 
 def parse_args():
@@ -189,6 +327,11 @@ def parse_args():
     cfg = ConfigParser(args_pre.config)
     exp_cfg = ConfigParser(args_pre.experiment_config)
     post_cfg = ConfigParser(args_pre.post_config)
+    experimental_config_enabled = exp_cfg.get(
+        "enable_experimental_config",
+        False,
+        bool,
+    )
 
     # Unified grid controls from config.txt.
     uniform_grid = cfg.get("uniform_grid", None, bool)
@@ -234,6 +377,11 @@ def parse_args():
                    default=cfg.get("save_dt", 0.5, float))
     p.add_argument("--outdir",   type=str,
                    default=cfg.get("outdir", default_outdir, str))
+    p.add_argument("--resume-from", type=str, default=cfg.get("resume_from", "", str),
+                   help="Resume from a saved snapshot path instead of starting from t=0")
+    p.add_argument("--resume-latest", type=str_to_bool,
+                   default=cfg.get("resume_latest", False, bool),
+                   help="Resume from the latest snap_*.npz in --outdir")
     p.add_argument("--grid-type", type=str,
                    choices=["uniform", "nonuniform"],
                    default=grid_type_default,
@@ -267,38 +415,276 @@ def parse_args():
     p.add_argument("--cylinder-center-y", type=float,
                    default=cfg.get("cylinder_center_y", -1.0, float),
                    help="Cylinder center y-coordinate in physical units (<0 uses default ly/2)")
+    p.add_argument("--cylinder-free-y-dof", type=str_to_bool,
+                   default=_experimental_default(
+                       exp_cfg,
+                       experimental_config_enabled,
+                       "cylinder_free_y_dof",
+                       False,
+                       bool,
+                   ),
+                   help=(
+                       "Experimental option: request one-degree-of-freedom "
+                       "transverse cylinder motion for VIV studies"
+                   ))
+    p.add_argument("--cylinder-free-x-dof", type=str_to_bool,
+                   default=_experimental_default(
+                       exp_cfg,
+                       experimental_config_enabled,
+                       "cylinder_free_x_dof",
+                       False,
+                       bool,
+                   ),
+                   help=(
+                       "Experimental option: request free streamwise cylinder "
+                       "motion with the spring-mass-damper model"
+                   ))
+    p.add_argument("--cylinder-free-x-mass", type=float,
+                   default=_experimental_default(
+                       exp_cfg,
+                       experimental_config_enabled,
+                       "cylinder_free_x_mass",
+                       100.0,
+                       float,
+                   ),
+                   help="Mass for the experimental free-x cylinder oscillator")
+    p.add_argument("--cylinder-free-x-damping", type=float,
+                   default=_experimental_default(
+                       exp_cfg,
+                       experimental_config_enabled,
+                       "cylinder_free_x_damping",
+                       5.0,
+                       float,
+                   ),
+                   help="Damping coefficient for the experimental free-x cylinder oscillator")
+    p.add_argument("--cylinder-free-x-stiffness", type=float,
+                   default=_experimental_default(
+                       exp_cfg,
+                       experimental_config_enabled,
+                       "cylinder_free_x_stiffness",
+                       20.0,
+                       float,
+                   ),
+                   help="Spring stiffness for the experimental free-x cylinder oscillator")
+    p.add_argument("--cylinder-free-x-initial-velocity", type=float,
+                   default=_experimental_default(
+                       exp_cfg,
+                       experimental_config_enabled,
+                       "cylinder_free_x_initial_velocity",
+                       0.0,
+                       float,
+                   ),
+                   help="Initial streamwise velocity for the experimental free-x cylinder oscillator")
+    p.add_argument("--cylinder-free-x-force-relaxation", type=float,
+                   default=_experimental_default(
+                       exp_cfg,
+                       experimental_config_enabled,
+                       "cylinder_free_x_force_relaxation",
+                       0.05,
+                       float,
+                   ),
+                   help="Exponential relaxation factor applied to the IBM drag force")
+    p.add_argument("--cylinder-free-x-max-displacement-percent", type=float,
+                   default=_experimental_default(
+                       exp_cfg,
+                       experimental_config_enabled,
+                       "cylinder_free_x_max_displacement_percent",
+                       25.0,
+                       float,
+                   ),
+                   help="Maximum free-x displacement as percent of cylinder diameter")
+    p.add_argument("--cylinder-free-x-max-speed", type=float,
+                   default=_experimental_default(
+                       exp_cfg,
+                       experimental_config_enabled,
+                       "cylinder_free_x_max_speed",
+                       0.25,
+                       float,
+                   ),
+                   help="Maximum absolute streamwise speed for the free-x cylinder")
+    p.add_argument("--cylinder-free-y-mass", type=float,
+                   default=_experimental_default(
+                       exp_cfg,
+                       experimental_config_enabled,
+                       "cylinder_free_y_mass",
+                       100.0,
+                       float,
+                   ),
+                   help="Mass for the experimental free-y cylinder oscillator")
+    p.add_argument("--cylinder-free-y-damping", type=float,
+                   default=_experimental_default(
+                       exp_cfg,
+                       experimental_config_enabled,
+                       "cylinder_free_y_damping",
+                       5.0,
+                       float,
+                   ),
+                   help="Damping coefficient for the experimental free-y cylinder oscillator")
+    p.add_argument("--cylinder-free-y-stiffness", type=float,
+                   default=_experimental_default(
+                       exp_cfg,
+                       experimental_config_enabled,
+                       "cylinder_free_y_stiffness",
+                       20.0,
+                       float,
+                   ),
+                   help="Spring stiffness for the experimental free-y cylinder oscillator")
+    p.add_argument("--cylinder-free-y-initial-velocity", type=float,
+                   default=_experimental_default(
+                       exp_cfg,
+                       experimental_config_enabled,
+                       "cylinder_free_y_initial_velocity",
+                       0.0,
+                       float,
+                   ),
+                   help="Initial transverse velocity for the experimental free-y cylinder oscillator")
+    p.add_argument("--cylinder-free-y-force-relaxation", type=float,
+                   default=_experimental_default(
+                       exp_cfg,
+                       experimental_config_enabled,
+                       "cylinder_free_y_force_relaxation",
+                       0.05,
+                       float,
+                   ),
+                   help="Exponential relaxation factor applied to the IBM lift force")
+    p.add_argument("--cylinder-free-y-max-displacement-percent", type=float,
+                   default=_experimental_default(
+                       exp_cfg,
+                       experimental_config_enabled,
+                       "cylinder_free_y_max_displacement_percent",
+                       25.0,
+                       float,
+                   ),
+                   help="Maximum free-y displacement as percent of cylinder diameter")
+    p.add_argument("--cylinder-free-y-max-speed", type=float,
+                   default=_experimental_default(
+                       exp_cfg,
+                       experimental_config_enabled,
+                       "cylinder_free_y_max_speed",
+                       0.25,
+                       float,
+                   ),
+                   help="Maximum absolute transverse speed for the free-y cylinder")
     p.add_argument("--cylinder-experiment", type=str,
                    choices=[
-                       "none",
+                       "circle",
                        "top-indent",
+                       "square",
+                       "airfoil",
                    ],
                    default=_normalize_cylinder_experiment_mode(
-                       exp_cfg.get("cylinder_experiment", "none", str)),
+                       _experimental_default(
+                           exp_cfg,
+                           experimental_config_enabled,
+                           "cylinder_experiment",
+                           "circle",
+                           str,
+                       )),
                    help="High-level experimental cylinder mode")
     p.add_argument("--cylinder-geometry-mode", type=str,
-                   choices=["circle", "circle-with-top-indent"],
+                   choices=["circle", "circle-with-top-indent", "square", "airfoil"],
                    default=_normalize_cylinder_geometry_mode(
-                       exp_cfg.get(
-                           "cylinder_geometry_mode",
-                           exp_cfg.get("ibm_shape", "circle", str),
-                           str,
+                       (
+                           _experimental_default(
+                               exp_cfg,
+                               experimental_config_enabled,
+                               "cylinder_geometry_mode",
+                               None,
+                               str,
+                           )
+                           or _experimental_default(
+                               exp_cfg,
+                               experimental_config_enabled,
+                               "ibm_shape",
+                               "circle",
+                               str,
+                           )
                        )),
                    help="Cylinder geometry mode")
     p.add_argument("--ibm-shape", type=str,
-                   choices=["circle", "circle-with-top-indent"],
+                   choices=["circle", "circle-with-top-indent", "square", "airfoil"],
                    default=_normalize_cylinder_geometry_mode(
-                       exp_cfg.get(
-                           "cylinder_geometry_mode",
-                           exp_cfg.get("ibm_shape", "circle", str),
-                           str,
+                       (
+                           _experimental_default(
+                               exp_cfg,
+                               experimental_config_enabled,
+                               "cylinder_geometry_mode",
+                               None,
+                               str,
+                           )
+                           or _experimental_default(
+                               exp_cfg,
+                               experimental_config_enabled,
+                               "ibm_shape",
+                               "circle",
+                               str,
+                           )
                        )),
                    help="Immersed-body shape")
     p.add_argument("--cylinder-indent-width", type=float,
-                   default=exp_cfg.get("cylinder_indent_width", 0.0, float),
+                   default=_experimental_default(
+                       exp_cfg,
+                       experimental_config_enabled,
+                       "cylinder_indent_width",
+                       0.0,
+                       float,
+                   ),
                    help="Width of the rectangular top indent for circle-with-top-indent")
     p.add_argument("--cylinder-indent-depth", type=float,
-                   default=exp_cfg.get("cylinder_indent_depth", 0.0, float),
+                   default=_experimental_default(
+                       exp_cfg,
+                       experimental_config_enabled,
+                       "cylinder_indent_depth",
+                       0.0,
+                       float,
+                   ),
                    help="Depth of the rectangular top indent for circle-with-top-indent")
+    p.add_argument("--airfoil-chord", type=float,
+                   default=_experimental_default(
+                       exp_cfg,
+                       experimental_config_enabled,
+                       "airfoil_chord",
+                       -1.0,
+                       float,
+                   ),
+                   help="NACA 00xx airfoil chord length (<=0 uses cylinder diameter)")
+    p.add_argument("--airfoil-thickness-percent", type=float,
+                   default=_experimental_default(
+                       exp_cfg,
+                       experimental_config_enabled,
+                       "airfoil_thickness_percent",
+                       12.0,
+                       float,
+                   ),
+                   help="NACA 00xx maximum thickness as percent of chord")
+    p.add_argument("--airfoil-angle-deg", type=float,
+                   default=_experimental_default(
+                       exp_cfg,
+                       experimental_config_enabled,
+                       "airfoil_angle_deg",
+                       0.0,
+                       float,
+                   ),
+                   help="Airfoil angle of attack in degrees")
+    p.add_argument("--surface-sample-offset-factor", type=float,
+                   default=post_cfg.get(
+                       "surface_force_sample_offset_factor", 0.5, float),
+                   help=(
+                       "Surface-force contour offset in local grid spacings "
+                       "for pressure/viscous post-processing"
+                   ))
+    p.add_argument("--truncate-y-cells", type=int,
+                   default=_experimental_default(
+                       exp_cfg,
+                       experimental_config_enabled,
+                       "truncate_y_cells",
+                       0,
+                       int,
+                   ),
+                   help=(
+                       "Experimental option: drop this many cells from both "
+                       "the bottom and top of the y-domain before running"
+                   ))
     p.add_argument("--re-is-cylinder-based", type=str_to_bool,
                    default=cfg.get("re_is_cylinder_based", True, bool),
                    help="Interpret --re as Re_D based on cylinder diameter when cylinder is enabled")
@@ -370,6 +756,20 @@ def parse_args():
                    default=post_cfg.get(
                        "auto_generate_shedding_spectrum", False, bool),
                    help="Automatically save the Fourier energy spectrum of C_l")
+    p.add_argument("--auto-generate-drag-decomposition", type=str_to_bool,
+                   default=post_cfg.get(
+                       "auto_generate_drag_decomposition", False, bool),
+                   help=(
+                       "Automatically save pressure and viscous drag/lift "
+                       "component histories"
+                   ))
+    p.add_argument("--auto-generate-drag-decomposition-plot", type=str_to_bool,
+                   default=post_cfg.get(
+                       "auto_generate_drag_decomposition_plot", False, bool),
+                   help=(
+                       "Automatically save a pressure/viscous force "
+                       "decomposition figure"
+                   ))
     p.add_argument("--auto-generate-pressure-coefficient-theta", type=str_to_bool,
                    default=post_cfg.get(
                        "auto_generate_pressure_coefficient_theta", False, bool),
@@ -449,7 +849,14 @@ def parse_args():
                    help="Minimum time used when auto-generating coefficient history")
     p.add_argument("--auto-aero-t-min", type=float,
                    default=post_cfg.get("auto_aero_t_min", 1.0, float),
-                   help="Minimum time used when auto-generating aerodynamic analysis")
+                   help="Minimum time used for auto-generated aerodynamic frequency analysis")
+    p.add_argument("--auto-aero-stats-t-min", type=float,
+                   default=post_cfg.get(
+                       "auto_aero_stats_t_min",
+                       post_cfg.get("auto_aero_t_min", 1.0, float),
+                       float,
+                   ),
+                   help="Minimum time used for auto-generated drag/lift statistics")
     args = p.parse_args()
 
     args.x_min = 0.0 if args.x_min is None else float(args.x_min)
@@ -480,6 +887,8 @@ def parse_args():
     args.lx = float(args.x_max - args.x_min)
     args.ly = float(args.y_max - args.y_min)
     args.nonuniform_mode = "center-uniform"
+    args.experimental_config_enabled = bool(experimental_config_enabled)
+    _apply_y_truncation_to_args(args, p)
     return args
 
 
@@ -502,6 +911,54 @@ def _expected_nonuniform_band(args) -> tuple[float, float, float, float]:
 def _ensure_results_dir() -> str:
     os.makedirs(RESULTS_DIR, exist_ok=True)
     return RESULTS_DIR
+
+
+def _latest_snapshot_path(outdir: str) -> str | None:
+    if not os.path.isdir(outdir):
+        return None
+    snapshots = [
+        os.path.join(outdir, name)
+        for name in os.listdir(outdir)
+        if (
+            name.startswith("snap_")
+            and name.endswith(".npz")
+            and os.path.getsize(os.path.join(outdir, name)) > 0
+        )
+    ]
+    best_path = None
+    best_time = -np.inf
+    for path in snapshots:
+        try:
+            with np.load(path, allow_pickle=False) as data:
+                for key in ("u", "v", "p", "t"):
+                    if key not in data:
+                        raise KeyError(key)
+                snapshot_time = float(data["t"])
+            if snapshot_time > best_time:
+                best_time = snapshot_time
+                best_path = path
+        except (OSError, ValueError, KeyError):
+            continue
+    return best_path
+
+
+def _resolve_resume_snapshot(args) -> str | None:
+    resume_from = str(args.resume_from).strip()
+    if resume_from:
+        path = resume_from
+        if not os.path.isabs(path):
+            path = os.path.join(SCRIPT_DIR, path)
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"Resume snapshot not found: {path}")
+        return path
+    if args.resume_latest:
+        path = _latest_snapshot_path(args.outdir)
+        if path is None:
+            raise FileNotFoundError(
+                f"No snap_*.npz files found in resume outdir: {args.outdir}"
+            )
+        return path
+    return None
 
 
 def _resolve_cylinder_geometry(args) -> tuple[float, float, float]:
@@ -580,13 +1037,60 @@ def _resolve_indent_geometry(args, radius: float) -> tuple[float, float]:
 
 def _resolve_experiment_overrides(args) -> str:
     experiment = _normalize_cylinder_experiment_mode(
-        getattr(args, "cylinder_experiment", "none")
+        getattr(args, "cylinder_experiment", "circle")
     )
+    if experiment == "circle":
+        return "circle"
     if experiment == "top-indent":
         return "circle-with-top-indent"
+    if experiment == "square":
+        return "square"
+    if experiment == "airfoil":
+        return "airfoil"
     return _normalize_cylinder_geometry_mode(
         getattr(args, "cylinder_geometry_mode", getattr(args, "ibm_shape", "circle"))
     )
+
+
+def _resolve_airfoil_geometry(args, radius: float) -> tuple[float, float, float]:
+    chord = float(getattr(args, "airfoil_chord", -1.0))
+    if chord <= 0.0:
+        chord = 2.0 * float(radius)
+    thickness_ratio = 0.01 * float(getattr(args, "airfoil_thickness_percent", 12.0))
+    angle_deg = float(getattr(args, "airfoil_angle_deg", 0.0))
+    if thickness_ratio <= 0.0:
+        raise ValueError("airfoil_thickness_percent must be positive")
+    return chord, thickness_ratio, angle_deg
+
+
+def _airfoil_outline_points(
+    cx: float,
+    cy: float,
+    chord: float,
+    thickness_ratio: float,
+    angle_deg: float,
+    n_points: int = 160,
+) -> tuple[np.ndarray, np.ndarray]:
+    s = np.linspace(0.0, 1.0, int(n_points))
+    yt = 5.0 * thickness_ratio * chord * (
+        0.2969 * np.sqrt(s)
+        - 0.1260 * s
+        - 0.3516 * s ** 2
+        + 0.2843 * s ** 3
+        - 0.1015 * s ** 4
+    )
+    x_upper = s * chord - 0.5 * chord
+    x_lower = x_upper[::-1]
+    y_upper = yt
+    y_lower = -yt[::-1]
+    x_local = np.concatenate([x_upper, x_lower])
+    y_local = np.concatenate([y_upper, y_lower])
+    angle = np.deg2rad(float(angle_deg))
+    cos_a = np.cos(angle)
+    sin_a = np.sin(angle)
+    x = float(cx) + cos_a * x_local - sin_a * y_local
+    y = float(cy) + sin_a * x_local + cos_a * y_local
+    return x, y
 
 
 def _plot_ibm_outline(
@@ -595,14 +1099,42 @@ def _plot_ibm_outline(
     color: str = "white",
     linewidth: float = 1.6,
     time: float = 0.0,
+    center_override: tuple[float, float] | None = None,
 ) -> None:
     cx, cy, radius = _cylinder_center_at_time(args, time)
+    if center_override is not None:
+        cx, cy = center_override
     shape = _resolve_experiment_overrides(args)
     theta = np.linspace(0.0, 2.0 * np.pi, 361)
     x = cx + radius * np.cos(theta)
     y = cy + radius * np.sin(theta)
     if shape == "circle":
         ax.plot(x, y, color=color, linewidth=linewidth, zorder=6)
+        return
+    if shape == "square":
+        half_side = radius
+        left = cx - half_side
+        right = cx + half_side
+        bottom = cy - half_side
+        top = cy + half_side
+        ax.plot(
+            [left, right, right, left, left],
+            [bottom, bottom, top, top, bottom],
+            color=color,
+            linewidth=linewidth,
+            zorder=6,
+        )
+        return
+    if shape == "airfoil":
+        chord, thickness_ratio, angle_deg = _resolve_airfoil_geometry(args, radius)
+        x_airfoil, y_airfoil = _airfoil_outline_points(
+            cx,
+            cy,
+            chord,
+            thickness_ratio,
+            angle_deg,
+        )
+        ax.plot(x_airfoil, y_airfoil, color=color, linewidth=linewidth, zorder=6)
         return
 
     indent_width, indent_depth = _resolve_indent_geometry(args, radius)
@@ -665,13 +1197,43 @@ def _snapshot_metadata(args, solver) -> dict:
         "y_min": args.y_min,
         "y_max": args.y_max,
         "re": args.re,
+        "re_is_cylinder_based": bool(args.re_is_cylinder_based),
+        "experimental_config_enabled": bool(args.experimental_config_enabled),
+        "cylinder_free_x_dof": bool(args.cylinder_free_x_dof),
+        "cylinder_free_x_mass": float(args.cylinder_free_x_mass),
+        "cylinder_free_x_damping": float(args.cylinder_free_x_damping),
+        "cylinder_free_x_stiffness": float(args.cylinder_free_x_stiffness),
+        "cylinder_free_x_force_relaxation": float(args.cylinder_free_x_force_relaxation),
+        "cylinder_free_x_max_displacement_percent": float(args.cylinder_free_x_max_displacement_percent),
+        "cylinder_free_x_max_speed": float(args.cylinder_free_x_max_speed),
+        "cylinder_free_y_dof": bool(args.cylinder_free_y_dof),
+        "cylinder_free_y_mass": float(args.cylinder_free_y_mass),
+        "cylinder_free_y_damping": float(args.cylinder_free_y_damping),
+        "cylinder_free_y_stiffness": float(args.cylinder_free_y_stiffness),
+        "cylinder_free_y_force_relaxation": float(args.cylinder_free_y_force_relaxation),
+        "cylinder_free_y_max_displacement_percent": float(args.cylinder_free_y_max_displacement_percent),
+        "cylinder_free_y_max_speed": float(args.cylinder_free_y_max_speed),
         "ibm_force_x": solver.last_ibm_force_x,
         "ibm_force_y": solver.last_ibm_force_y,
+        "y_truncation_enabled": bool(args.y_truncation_enabled),
+        "y_truncation_cells_each_end": int(args.y_truncation_cells_each_end),
+        "source_ny_before_y_truncation": int(args.source_ny_before_y_truncation),
+        "source_y_min_before_y_truncation": float(args.source_y_min_before_y_truncation),
+        "source_y_max_before_y_truncation": float(args.source_y_max_before_y_truncation),
         "cylinder_enabled": bool(args.cylinder),
         "cylinder_omega": _cylinder_angular_velocity(args, solver.t),
     }
     if args.cylinder:
         cx, cy, radius = _cylinder_center_at_time(args, solver.t)
+        if (args.cylinder_free_x_dof or args.cylinder_free_y_dof) and solver.ibm is not None:
+            free_state = solver.ibm.first_free_y_circle_state()
+            if free_state is not None:
+                cx = free_state["center_x"]
+                cy = free_state["center_y"]
+                metadata["cylinder_free_x_velocity"] = free_state["velocity_x"]
+                metadata["cylinder_free_x_displacement"] = free_state["displacement_x"]
+                metadata["cylinder_free_y_velocity"] = free_state["velocity_y"]
+                metadata["cylinder_free_y_displacement"] = free_state["displacement_y"]
         metadata["cylinder_center_x"] = cx
         metadata["cylinder_center_y"] = cy
         metadata["cylinder_radius"] = radius
@@ -761,29 +1323,59 @@ def _nonuniform_metadata_matches_args(metadata: dict, args) -> bool:
 
 def prepare_uniform_grid(args):
     """Build the runtime grid and write its metadata before the solver starts."""
-    grid = CartesianGrid(nx=args.nx, ny=args.ny, lx=args.lx, ly=args.ly,
-                         x_min=args.x_min, y_min=args.y_min)
+    yf = getattr(args, "_truncated_yf", None)
+    grid = CartesianGrid(
+        nx=args.nx,
+        ny=args.ny,
+        lx=args.lx,
+        ly=args.ly,
+        x_min=args.x_min,
+        y_min=args.y_min,
+        yf=yf,
+    )
     os.makedirs(args.outdir, exist_ok=True)
-    save_grid_metadata(_grid_metadata_path(args), grid)
+    if getattr(args, "y_truncation_enabled", False):
+        metadata = grid.to_metadata()
+        metadata["y_truncation_cells_each_end"] = int(args.y_truncation_cells_each_end)
+        metadata["source_ny_before_y_truncation"] = int(
+            args.source_ny_before_y_truncation
+        )
+        metadata["source_y_min_before_y_truncation"] = float(
+            args.source_y_min_before_y_truncation
+        )
+        metadata["source_y_max_before_y_truncation"] = float(
+            args.source_y_max_before_y_truncation
+        )
+        save_grid_metadata_dict(_grid_metadata_path(args), metadata)
+    else:
+        save_grid_metadata(_grid_metadata_path(args), grid)
     return grid
 
 
 def prepare_nonuniform_grid(args):
     """Build the runtime non-uniform grid and write its metadata before startup."""
+    source_ny = int(getattr(args, "source_ny_before_y_truncation", args.ny))
+    source_y_min = float(getattr(args, "source_y_min_before_y_truncation", args.y_min))
+    source_ly = float(getattr(args, "source_ly_before_y_truncation", args.ly))
     metadata = build_nonuniform_grid_metadata(
         nx=args.nx,
-        ny=args.ny,
+        ny=source_ny,
         lx=args.lx,
-        ly=args.ly,
+        ly=source_ly,
         beta_x=args.beta_x,
         beta_y=args.beta_y,
         x_min=args.x_min,
-        y_min=args.y_min,
+        y_min=source_y_min,
         uniform_x_start=args.uniform_x_start,
         uniform_x_end=args.uniform_x_end,
         uniform_y_start=args.uniform_y_start,
         uniform_y_end=args.uniform_y_end,
     )
+    if getattr(args, "y_truncation_enabled", False):
+        metadata = _truncate_grid_metadata_y(
+            metadata,
+            int(args.y_truncation_cells_each_end),
+        )
     os.makedirs(args.outdir, exist_ok=True)
     save_grid_metadata_dict(_grid_metadata_path(args), metadata)
     return CartesianGrid.from_metadata(metadata)
@@ -826,6 +1418,11 @@ def run(args, grid=None, grid_loaded_from_file=False):
         print("  2-D Incompressible Navier-Stokes Solver")
         print("=" * 60)
         print(f"  Config file   : {args.config}")
+        print(
+            "  Experiment cfg: "
+            f"{'enabled' if args.experimental_config_enabled else 'ignored'} "
+            f"({args.experiment_config})"
+        )
         print(f"  Grid          : {args.nx} x {args.ny}")
         print(f"  Grid type     : {args.grid_type}")
         if args.grid_type == "nonuniform":
@@ -835,6 +1432,15 @@ def run(args, grid=None, grid_loaded_from_file=False):
             f"x=[{args.x_min}, {args.x_max}] (Lx={args.lx}), "
             f"y=[{args.y_min}, {args.y_max}] (Ly={args.ly})"
         )
+        if args.y_truncation_enabled:
+            print(
+                "  Y truncation  : "
+                f"dropped {args.y_truncation_cells_each_end} cells from "
+                "bottom and top "
+                f"(source ny={args.source_ny_before_y_truncation}, "
+                f"source y=[{args.source_y_min_before_y_truncation}, "
+                f"{args.source_y_max_before_y_truncation}])"
+            )
         print(f"  Reynolds no.  : {args.re}")
         print(f"  End time      : {args.t_end}")
         print(f"  MPI ranks     : {decomp.size}")
@@ -884,19 +1490,98 @@ def run(args, grid=None, grid_loaded_from_file=False):
         rotation_mode = _normalize_cylinder_rotation_mode(args.cylinder_rotation_mode)
         translation_cfg = _resolve_cylinder_translation(args, cx, cy, r)
         translation_mode = translation_cfg["mode"]
+        free_cylinder_dof = args.cylinder_free_x_dof or args.cylinder_free_y_dof
+        if free_cylinder_dof:
+            if ibm_shape != "circle":
+                raise ValueError("free cylinder DoF currently supports circle bodies only")
+            if rotation_mode != "stationary" or translation_mode != "stationary":
+                raise ValueError(
+                    "free cylinder DoF cannot be combined with prescribed "
+                    "rotation or translation"
+                )
         if ibm_shape != "circle" and rotation_mode != "stationary":
             raise ValueError(
-                "circle-with-top-indent currently supports stationary IBM bodies only"
+                f"{ibm_shape} currently supports stationary IBM bodies only"
             )
         if ibm_shape != "circle" and translation_mode != "stationary":
             raise ValueError(
-                "circle-with-top-indent currently supports stationary IBM bodies only"
+                f"{ibm_shape} currently supports stationary IBM bodies only"
             )
         if rotation_mode != "stationary" and translation_mode != "stationary":
             raise ValueError(
                 "cylinder rotation and cylinder translation are mutually exclusive"
             )
-        if translation_mode != "stationary":
+        if free_cylinder_dof:
+            if args.cylinder_free_x_dof and args.cylinder_free_y_dof:
+                if not np.isclose(args.cylinder_free_x_mass, args.cylinder_free_y_mass):
+                    raise ValueError("free x/y DoF currently require matching mass")
+                if not np.isclose(args.cylinder_free_x_damping, args.cylinder_free_y_damping):
+                    raise ValueError("free x/y DoF currently require matching damping")
+                if not np.isclose(args.cylinder_free_x_stiffness, args.cylinder_free_y_stiffness):
+                    raise ValueError("free x/y DoF currently require matching stiffness")
+                if not np.isclose(
+                    args.cylinder_free_x_force_relaxation,
+                    args.cylinder_free_y_force_relaxation,
+                ):
+                    raise ValueError("free x/y DoF currently require matching force relaxation")
+                if not np.isclose(
+                    args.cylinder_free_x_max_displacement_percent,
+                    args.cylinder_free_y_max_displacement_percent,
+                ):
+                    raise ValueError("free x/y DoF currently require matching max displacement")
+                if not np.isclose(args.cylinder_free_x_max_speed, args.cylinder_free_y_max_speed):
+                    raise ValueError("free x/y DoF currently require matching max speed")
+            free_mass = (
+                args.cylinder_free_x_mass
+                if args.cylinder_free_x_dof
+                else args.cylinder_free_y_mass
+            )
+            free_damping = (
+                args.cylinder_free_x_damping
+                if args.cylinder_free_x_dof
+                else args.cylinder_free_y_damping
+            )
+            free_stiffness = (
+                args.cylinder_free_x_stiffness
+                if args.cylinder_free_x_dof
+                else args.cylinder_free_y_stiffness
+            )
+            free_force_relaxation = (
+                args.cylinder_free_x_force_relaxation
+                if args.cylinder_free_x_dof
+                else args.cylinder_free_y_force_relaxation
+            )
+            free_max_displacement_percent = (
+                args.cylinder_free_x_max_displacement_percent
+                if args.cylinder_free_x_dof
+                else args.cylinder_free_y_max_displacement_percent
+            )
+            free_max_speed = (
+                args.cylinder_free_x_max_speed
+                if args.cylinder_free_x_dof
+                else args.cylinder_free_y_max_speed
+            )
+            ibm.add_free_y_circle(
+                cx,
+                cy,
+                r,
+                mass=free_mass,
+                damping=free_damping,
+                stiffness=free_stiffness,
+                initial_velocity_x=args.cylinder_free_x_initial_velocity,
+                initial_velocity_y=args.cylinder_free_y_initial_velocity,
+                force_relaxation=free_force_relaxation,
+                max_displacement=(
+                    0.01
+                    * free_max_displacement_percent
+                    * 2.0
+                    * r
+                ),
+                max_speed=free_max_speed,
+                free_x=args.cylinder_free_x_dof,
+                free_y=args.cylinder_free_y_dof,
+            )
+        elif translation_mode != "stationary":
             ibm.add_translating_circle(
                 cx,
                 cy,
@@ -932,18 +1617,60 @@ def run(args, grid=None, grid_loaded_from_file=False):
                     indent_width=indent_width,
                     indent_depth=indent_depth,
                 )
+            elif ibm_shape == "square":
+                ibm.add_rectangle(cx - r, cx + r, cy - r, cy + r)
+            elif ibm_shape == "airfoil":
+                chord, thickness_ratio, angle_deg = _resolve_airfoil_geometry(args, r)
+                ibm.add_naca_00xx_airfoil(
+                    cx,
+                    cy,
+                    chord=chord,
+                    thickness_ratio=thickness_ratio,
+                    angle_deg=angle_deg,
+                )
             else:
                 ibm.add_circle(cx, cy, r)
         if is_root and args.verbose:
             print(
                 f"  IBM cylinder: centre=({cx:.2f},{cy:.2f}), r={r:.4f}, "
-                f"shape={ibm_shape}, experiment={_normalize_cylinder_experiment_mode(args.cylinder_experiment)}"
+                f"shape={ibm_shape}, "
+                f"experiment={_normalize_cylinder_experiment_mode(args.cylinder_experiment)}"
             )
             if ibm_shape == "circle-with-top-indent":
                 indent_width, indent_depth = _resolve_indent_geometry(args, r)
                 print(
                     "  Top indent   : "
                     f"width={indent_width:.4f}, depth={indent_depth:.4f}"
+                )
+            elif ibm_shape == "square":
+                print(f"  Square body  : side={2.0 * r:.4f}")
+            elif ibm_shape == "airfoil":
+                chord, thickness_ratio, angle_deg = _resolve_airfoil_geometry(args, r)
+                print(
+                    "  Airfoil body : "
+                    f"NACA 00{100.0 * thickness_ratio:.0f}, "
+                    f"chord={chord:.4f}, alpha={angle_deg:.4g} deg"
+                )
+            if free_cylinder_dof:
+                free_axes = "".join(
+                    axis
+                    for axis, enabled in (
+                        ("x", args.cylinder_free_x_dof),
+                        ("y", args.cylinder_free_y_dof),
+                    )
+                    if enabled
+                )
+                print(
+                    "  Cylinder DOF : "
+                    f"free-{free_axes}, "
+                    f"m={free_mass:.4g}, "
+                    f"c={free_damping:.4g}, "
+                    f"k={free_stiffness:.4g}, "
+                    f"vx0={args.cylinder_free_x_initial_velocity:.4g}, "
+                    f"vy0={args.cylinder_free_y_initial_velocity:.4g}, "
+                    f"relax={free_force_relaxation:.4g}, "
+                    f"max displacement={free_max_displacement_percent:.4g}% D, "
+                    f"max speed={free_max_speed:.4g}"
                 )
             if rotation_mode == "oscillatory":
                 print(
@@ -981,7 +1708,12 @@ def run(args, grid=None, grid_loaded_from_file=False):
 
     initial_v_perturbation = 0.01 * \
         args.initial_v_perturbation_percent * bc.u_inf
-    solver = FractionalStepSolver(grid, bc, nu, ibm=ibm)
+    solver = FractionalStepSolver(
+        grid,
+        bc,
+        nu,
+        ibm=ibm,
+    )
     solver.init_fields(
         u0=bc.u_inf,
         v0=bc.v_inf,
@@ -994,6 +1726,41 @@ def run(args, grid=None, grid_loaded_from_file=False):
             f"-> dv={initial_v_perturbation:.6g}"
         )
 
+    resume_snapshot = _resolve_resume_snapshot(args)
+    if resume_snapshot is not None:
+        u_restart, v_restart, p_restart, t_restart, _ = load_snapshot(
+            resume_snapshot, fmt="numpy"
+        )
+        expected_shapes = {
+            "u": solver.u.shape,
+            "v": solver.v.shape,
+            "p": solver.p.shape,
+        }
+        found_shapes = {
+            "u": u_restart.shape,
+            "v": v_restart.shape,
+            "p": p_restart.shape,
+        }
+        if found_shapes != expected_shapes:
+            raise ValueError(
+                "Resume snapshot field shapes do not match this run: "
+                f"expected={expected_shapes}, found={found_shapes}"
+            )
+        solver.u[:, :] = u_restart
+        solver.v[:, :] = v_restart
+        solver.p[:, :] = p_restart
+        solver.t = float(t_restart)
+        if solver.t >= args.t_end - 1e-12:
+            raise ValueError(
+                f"Resume snapshot t={solver.t:.4f} is already at/after "
+                f"t_end={args.t_end:.4f}"
+            )
+        if is_root and args.verbose:
+            print(
+                f"  Resuming from : {resume_snapshot} "
+                f"(t={solver.t:.4f})"
+            )
+
     # ------------------------------------------------------------------
     # Output directory
     # ------------------------------------------------------------------
@@ -1004,6 +1771,8 @@ def run(args, grid=None, grid_loaded_from_file=False):
     # Time loop
     # ------------------------------------------------------------------
     t_save_next = 0.0
+    if resume_snapshot is not None:
+        t_save_next = (np.floor(solver.t / args.save_dt) + 1.0) * args.save_dt
     step_count = 0
 
     if is_root and args.verbose:
@@ -1021,7 +1790,7 @@ def run(args, grid=None, grid_loaded_from_file=False):
             div_max = np.max(np.abs(solver.divergence()))
             cfl_val = solver.cfl(dt)
             print(f"  t={solver.t:8.4f}  dt={dt:.2e}  "
-                  f"|∇·u|_max={div_max:.2e}  CFL={cfl_val:.3f}")
+                  f"|div u|_max={div_max:.2e}  CFL={cfl_val:.3f}")
 
         # ---- save snapshot ----
         if solver.t >= t_save_next - 1e-12:
@@ -1082,8 +1851,23 @@ def _plot_results(solver, grid, args):
     if args.cylinder and args.draw_cylinder_overlay:
         # Draw the immersed cylinder on every panel so geometry alignment
         # is visible in vorticity, pressure, and velocity plots.
+        center_override = None
+        if (args.cylinder_free_x_dof or args.cylinder_free_y_dof) and solver.ibm is not None:
+            free_state = solver.ibm.first_free_y_circle_state()
+            if free_state is not None:
+                center_override = (
+                    free_state["center_x"],
+                    free_state["center_y"],
+                )
         for ax in axes:
-            _plot_ibm_outline(ax, args, color="black", linewidth=1.6, time=solver.t)
+            _plot_ibm_outline(
+                ax,
+                args,
+                color="black",
+                linewidth=1.6,
+                time=solver.t,
+                center_override=center_override,
+            )
 
     # Vorticity: use robust clipping + high-contrast diverging map
     # so coherent structures are easier to read.
@@ -1238,9 +2022,12 @@ def _run_auto_outputs(grid, args):
         args.auto_generate_coeff_history
         or args.auto_generate_aero_report
         or args.auto_generate_shedding_spectrum
+        or args.auto_generate_drag_decomposition
+        or args.auto_generate_drag_decomposition_plot
     )
     aero_series_path = os.path.join(results_dir, "aero.csv")
     aero_report_path = os.path.join(results_dir, "aero_report.txt")
+    drag_decomposition_path = os.path.join(results_dir, "drag_decomposition.csv")
     aero_ready = False
 
     if need_aero_series:
@@ -1254,7 +2041,18 @@ def _run_auto_outputs(grid, args):
                     args.re_is_cylinder_based and args.cylinder),
                 t_min=args.auto_aero_t_min,
                 save_series=aero_series_path,
+                save_drag_decomposition=(
+                    drag_decomposition_path
+                    if (
+                        args.auto_generate_drag_decomposition
+                        or args.auto_generate_drag_decomposition_plot
+                    )
+                    else None
+                ),
                 save_report=aero_report_path if args.auto_generate_aero_report else None,
+                force_source="surface-full",
+                surface_sample_offset_factor=args.surface_sample_offset_factor,
+                stats_t_min=args.auto_aero_stats_t_min,
             )
             aero_ready = status == 0 and os.path.exists(aero_series_path)
             if status != 0:
@@ -1262,6 +2060,26 @@ def _run_auto_outputs(grid, args):
         except Exception as exc:
             print(
                 f"  Warning: automatic aerodynamic post-processing failed: {exc}"
+            )
+
+    if args.auto_generate_drag_decomposition_plot:
+        if aero_ready and os.path.exists(drag_decomposition_path):
+            try:
+                plot_drag_decomposition(
+                    drag_decomposition_path,
+                    save_name="drag_decomposition.png",
+                    t_min=args.auto_coeff_t_min,
+                    results_dir=results_dir,
+                )
+            except Exception as exc:
+                print(
+                    "  Warning: automatic drag-decomposition plot failed: "
+                    f"{exc}"
+                )
+        else:
+            print(
+                "  Warning: automatic drag-decomposition plot skipped because "
+                "the decomposition series was not generated."
             )
 
     if args.auto_generate_coeff_history:
@@ -1272,6 +2090,7 @@ def _run_auto_outputs(grid, args):
                     aero_series_path,
                     save_name=coeff_history_name,
                     coeff_t_min=args.auto_coeff_t_min,
+                    settled_coeff_t_min=args.auto_aero_stats_t_min,
                 )
             except Exception as exc:
                 print(
