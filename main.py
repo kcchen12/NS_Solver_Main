@@ -59,6 +59,7 @@ from src.config import ConfigParser
 from analyze_aerodynamics import (
     run_analysis as run_aero_analysis,
     plot_drag_decomposition,
+    plot_y_oscillation_strouhal,
     plot_shedding_spectrum,
     save_pressure_coefficient_report,
 )
@@ -132,12 +133,23 @@ def _normalize_ibm_shape(raw_value: str | None) -> str:
         "naca": "airfoil",
         "naca0012": "airfoil",
         "naca-0012": "airfoil",
+        "custom": "polygon",
+        "coords": "polygon",
+        "coordinates": "polygon",
+        "user-polygon": "polygon",
+        "user_polygon": "polygon",
         "circle_top_indent": "circle-with-top-indent",
         "circle-with-indent": "circle-with-top-indent",
         "indented-circle": "circle-with-top-indent",
     }
     value = aliases.get(value, value)
-    return value if value in {"circle", "circle-with-top-indent", "square", "airfoil"} else "circle"
+    return value if value in {
+        "circle",
+        "circle-with-top-indent",
+        "square",
+        "airfoil",
+        "polygon",
+    } else "circle"
 
 
 def _normalize_cylinder_geometry_mode(raw_value: str | None) -> str:
@@ -172,15 +184,63 @@ def _normalize_cylinder_experiment_mode(raw_value: str | None) -> str:
         "naca": "airfoil",
         "naca0012": "airfoil",
         "naca-0012": "airfoil",
+        "custom": "polygon",
+        "coords": "polygon",
+        "coordinates": "polygon",
+        "user-polygon": "polygon",
+        "user_polygon": "polygon",
     }
     value = aliases.get(value, value)
-    return value if value in {"circle", "top-indent", "square", "airfoil"} else "circle"
+    return value if value in {
+        "circle",
+        "top-indent",
+        "square",
+        "airfoil",
+        "polygon",
+    } else "circle"
 
 
 def _experimental_default(exp_cfg: ConfigParser, enabled: bool, key: str, default, dtype):
     if not enabled:
         return default
     return exp_cfg.get(key, default, dtype)
+
+
+def _parse_free_displacement_percent(value) -> float:
+    text = str(value).strip().lower()
+    if text in {"off", "none", "disabled", "disable", "false", "no"}:
+        return float("inf")
+    try:
+        percent = float(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(
+            "expected a positive percent value or 'off'"
+        ) from exc
+    if percent <= 0.0:
+        raise argparse.ArgumentTypeError(
+            "expected a positive percent value or 'off'"
+        )
+    return percent
+
+
+def _experimental_displacement_percent(
+    exp_cfg: ConfigParser,
+    enabled: bool,
+    key: str,
+    default: float,
+) -> float:
+    if not enabled:
+        return default
+    raw_value = exp_cfg.get(key, None, str)
+    if raw_value is None:
+        return default
+    return _parse_free_displacement_percent(raw_value)
+
+
+def _format_free_displacement_percent(percent: float) -> str:
+    if np.isinf(percent):
+        return "off"
+    return f"{percent:.4g}% D"
 
 
 def _truncate_grid_metadata_y(metadata: dict, trim_cells: int) -> dict:
@@ -484,15 +544,18 @@ def parse_args():
                        float,
                    ),
                    help="Exponential relaxation factor applied to the IBM drag force")
-    p.add_argument("--cylinder-free-x-max-displacement-percent", type=float,
-                   default=_experimental_default(
+    p.add_argument("--cylinder-free-x-max-displacement-percent",
+                   type=_parse_free_displacement_percent,
+                   default=_experimental_displacement_percent(
                        exp_cfg,
                        experimental_config_enabled,
                        "cylinder_free_x_max_displacement_percent",
                        25.0,
-                       float,
                    ),
-                   help="Maximum free-x displacement as percent of cylinder diameter")
+                   help=(
+                       "Maximum free-x displacement as percent of cylinder "
+                       "diameter, or 'off' to disable the displacement clamp"
+                   ))
     p.add_argument("--cylinder-free-x-max-speed", type=float,
                    default=_experimental_default(
                        exp_cfg,
@@ -502,6 +565,18 @@ def parse_args():
                        float,
                    ),
                    help="Maximum absolute streamwise speed for the free-x cylinder")
+    p.add_argument("--cylinder-free-x-release-time", type=float,
+                   default=_experimental_default(
+                       exp_cfg,
+                       experimental_config_enabled,
+                       "cylinder_free_x_release_time",
+                       0.0,
+                       float,
+                   ),
+                   help=(
+                       "Simulation time when free-x motion is released "
+                       "(0 releases immediately)"
+                   ))
     p.add_argument("--cylinder-free-y-mass", type=float,
                    default=_experimental_default(
                        exp_cfg,
@@ -547,15 +622,18 @@ def parse_args():
                        float,
                    ),
                    help="Exponential relaxation factor applied to the IBM lift force")
-    p.add_argument("--cylinder-free-y-max-displacement-percent", type=float,
-                   default=_experimental_default(
+    p.add_argument("--cylinder-free-y-max-displacement-percent",
+                   type=_parse_free_displacement_percent,
+                   default=_experimental_displacement_percent(
                        exp_cfg,
                        experimental_config_enabled,
                        "cylinder_free_y_max_displacement_percent",
                        25.0,
-                       float,
                    ),
-                   help="Maximum free-y displacement as percent of cylinder diameter")
+                   help=(
+                       "Maximum free-y displacement as percent of cylinder "
+                       "diameter, or 'off' to disable the displacement clamp"
+                   ))
     p.add_argument("--cylinder-free-y-max-speed", type=float,
                    default=_experimental_default(
                        exp_cfg,
@@ -565,12 +643,106 @@ def parse_args():
                        float,
                    ),
                    help="Maximum absolute transverse speed for the free-y cylinder")
+    p.add_argument("--cylinder-free-y-release-time", type=float,
+                   default=_experimental_default(
+                       exp_cfg,
+                       experimental_config_enabled,
+                       "cylinder_free_y_release_time",
+                       0.0,
+                       float,
+                   ),
+                   help=(
+                       "Simulation time when free-y motion is released "
+                       "(0 releases immediately)"
+                   ))
+    p.add_argument("--cylinder-free-theta-dof", type=str_to_bool,
+                   default=_experimental_default(
+                       exp_cfg,
+                       experimental_config_enabled,
+                       "cylinder_free_theta_dof",
+                       False,
+                       bool,
+                   ),
+                   help="Experimental option: request free angular cylinder motion")
+    p.add_argument("--cylinder-free-theta-inertia", type=float,
+                   default=_experimental_default(
+                       exp_cfg,
+                       experimental_config_enabled,
+                       "cylinder_free_theta_inertia",
+                       10.0,
+                       float,
+                   ),
+                   help="Moment of inertia for the experimental angular oscillator")
+    p.add_argument("--cylinder-free-theta-damping", type=float,
+                   default=_experimental_default(
+                       exp_cfg,
+                       experimental_config_enabled,
+                       "cylinder_free_theta_damping",
+                       1.0,
+                       float,
+                   ),
+                   help="Angular damping coefficient for the experimental oscillator")
+    p.add_argument("--cylinder-free-theta-stiffness", type=float,
+                   default=_experimental_default(
+                       exp_cfg,
+                       experimental_config_enabled,
+                       "cylinder_free_theta_stiffness",
+                       5.0,
+                       float,
+                   ),
+                   help="Torsional spring stiffness for the experimental oscillator")
+    p.add_argument("--cylinder-free-theta-initial-angle-deg", type=float,
+                   default=_experimental_default(
+                       exp_cfg,
+                       experimental_config_enabled,
+                       "cylinder_free_theta_initial_angle_deg",
+                       0.0,
+                       float,
+                   ),
+                   help="Initial angular displacement in degrees")
+    p.add_argument("--cylinder-free-theta-initial-angular-velocity", type=float,
+                   default=_experimental_default(
+                       exp_cfg,
+                       experimental_config_enabled,
+                       "cylinder_free_theta_initial_angular_velocity",
+                       0.0,
+                       float,
+                   ),
+                   help="Initial angular velocity for the free-theta cylinder")
+    p.add_argument("--cylinder-free-theta-moment-relaxation", type=float,
+                   default=_experimental_default(
+                       exp_cfg,
+                       experimental_config_enabled,
+                       "cylinder_free_theta_moment_relaxation",
+                       0.05,
+                       float,
+                   ),
+                   help="Exponential relaxation factor applied to the IBM moment")
+    p.add_argument("--cylinder-free-theta-max-angle-deg", type=float,
+                   default=_experimental_default(
+                       exp_cfg,
+                       experimental_config_enabled,
+                       "cylinder_free_theta_max_angle_deg",
+                       45.0,
+                       float,
+                   ),
+                   help="Maximum absolute angular displacement in degrees")
+    p.add_argument("--cylinder-free-theta-max-angular-speed", type=float,
+                   default=_experimental_default(
+                       exp_cfg,
+                       experimental_config_enabled,
+                       "cylinder_free_theta_max_angular_speed",
+                       1.0,
+                       float,
+                   ),
+                   help="Maximum absolute angular speed for the free-theta cylinder")
     p.add_argument("--cylinder-experiment", type=str,
                    choices=[
                        "circle",
                        "top-indent",
                        "square",
                        "airfoil",
+                       "polygon",
                    ],
                    default=_normalize_cylinder_experiment_mode(
                        _experimental_default(
@@ -582,7 +754,13 @@ def parse_args():
                        )),
                    help="High-level experimental cylinder mode")
     p.add_argument("--cylinder-geometry-mode", type=str,
-                   choices=["circle", "circle-with-top-indent", "square", "airfoil"],
+                   choices=[
+                       "circle",
+                       "circle-with-top-indent",
+                       "square",
+                       "airfoil",
+                       "polygon",
+                   ],
                    default=_normalize_cylinder_geometry_mode(
                        (
                            _experimental_default(
@@ -602,7 +780,13 @@ def parse_args():
                        )),
                    help="Cylinder geometry mode")
     p.add_argument("--ibm-shape", type=str,
-                   choices=["circle", "circle-with-top-indent", "square", "airfoil"],
+                   choices=[
+                       "circle",
+                       "circle-with-top-indent",
+                       "square",
+                       "airfoil",
+                       "polygon",
+                   ],
                    default=_normalize_cylinder_geometry_mode(
                        (
                            _experimental_default(
@@ -666,6 +850,24 @@ def parse_args():
                        float,
                    ),
                    help="Airfoil angle of attack in degrees")
+    p.add_argument("--polygon-points", type=str,
+                   default=_experimental_default(
+                       exp_cfg,
+                       experimental_config_enabled,
+                       "polygon_points",
+                       "",
+                       str,
+                   ),
+                   help="Body-local polygon vertices as 'x,y; x,y; x,y'")
+    p.add_argument("--polygon-angle-deg", type=float,
+                   default=_experimental_default(
+                       exp_cfg,
+                       experimental_config_enabled,
+                       "polygon_angle_deg",
+                       0.0,
+                       float,
+                   ),
+                   help="Initial orientation for polygon body vertices")
     p.add_argument("--surface-sample-offset-factor", type=float,
                    default=post_cfg.get(
                        "surface_force_sample_offset_factor", 0.5, float),
@@ -756,6 +958,13 @@ def parse_args():
                    default=post_cfg.get(
                        "auto_generate_shedding_spectrum", False, bool),
                    help="Automatically save the Fourier energy spectrum of C_l")
+    p.add_argument("--auto-generate-y-oscillation-strouhal", type=str_to_bool,
+                   default=post_cfg.get(
+                       "auto_generate_y_oscillation_strouhal", False, bool),
+                   help=(
+                       "Automatically plot body y-oscillation frequency "
+                       "against lift Strouhal number"
+                   ))
     p.add_argument("--auto-generate-drag-decomposition", type=str_to_bool,
                    default=post_cfg.get(
                        "auto_generate_drag_decomposition", False, bool),
@@ -1047,6 +1256,8 @@ def _resolve_experiment_overrides(args) -> str:
         return "square"
     if experiment == "airfoil":
         return "airfoil"
+    if experiment == "polygon":
+        return "polygon"
     return _normalize_cylinder_geometry_mode(
         getattr(args, "cylinder_geometry_mode", getattr(args, "ibm_shape", "circle"))
     )
@@ -1061,6 +1272,32 @@ def _resolve_airfoil_geometry(args, radius: float) -> tuple[float, float, float]
     if thickness_ratio <= 0.0:
         raise ValueError("airfoil_thickness_percent must be positive")
     return chord, thickness_ratio, angle_deg
+
+
+def _parse_polygon_points(raw_value: str) -> np.ndarray:
+    text = str(raw_value or "").strip()
+    if not text:
+        raise ValueError("polygon_points must contain at least three x,y pairs")
+    points: list[tuple[float, float]] = []
+    for chunk in text.replace("|", ";").split(";"):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        parts = [part.strip() for part in chunk.split(",")]
+        if len(parts) != 2:
+            raise ValueError(
+                "polygon_points must use 'x,y; x,y; x,y' coordinate pairs"
+            )
+        points.append((float(parts[0]), float(parts[1])))
+    if len(points) < 3:
+        raise ValueError("polygon_points must contain at least three points")
+    return np.asarray(points, dtype=float)
+
+
+def _resolve_polygon_geometry(args) -> tuple[np.ndarray, float]:
+    points = _parse_polygon_points(getattr(args, "polygon_points", ""))
+    angle_deg = float(getattr(args, "polygon_angle_deg", 0.0))
+    return points, angle_deg
 
 
 def _airfoil_outline_points(
@@ -1136,6 +1373,21 @@ def _plot_ibm_outline(
         )
         ax.plot(x_airfoil, y_airfoil, color=color, linewidth=linewidth, zorder=6)
         return
+    if shape == "polygon":
+        points, angle_deg = _resolve_polygon_geometry(args)
+        angle = np.deg2rad(angle_deg)
+        cos_a = np.cos(angle)
+        sin_a = np.sin(angle)
+        x_poly = cx + cos_a * points[:, 0] - sin_a * points[:, 1]
+        y_poly = cy + sin_a * points[:, 0] + cos_a * points[:, 1]
+        ax.plot(
+            np.r_[x_poly, x_poly[0]],
+            np.r_[y_poly, y_poly[0]],
+            color=color,
+            linewidth=linewidth,
+            zorder=6,
+        )
+        return
 
     indent_width, indent_depth = _resolve_indent_geometry(args, radius)
     notch_left = cx - 0.5 * indent_width
@@ -1206,6 +1458,7 @@ def _snapshot_metadata(args, solver) -> dict:
         "cylinder_free_x_force_relaxation": float(args.cylinder_free_x_force_relaxation),
         "cylinder_free_x_max_displacement_percent": float(args.cylinder_free_x_max_displacement_percent),
         "cylinder_free_x_max_speed": float(args.cylinder_free_x_max_speed),
+        "cylinder_free_x_release_time": float(args.cylinder_free_x_release_time),
         "cylinder_free_y_dof": bool(args.cylinder_free_y_dof),
         "cylinder_free_y_mass": float(args.cylinder_free_y_mass),
         "cylinder_free_y_damping": float(args.cylinder_free_y_damping),
@@ -1213,6 +1466,14 @@ def _snapshot_metadata(args, solver) -> dict:
         "cylinder_free_y_force_relaxation": float(args.cylinder_free_y_force_relaxation),
         "cylinder_free_y_max_displacement_percent": float(args.cylinder_free_y_max_displacement_percent),
         "cylinder_free_y_max_speed": float(args.cylinder_free_y_max_speed),
+        "cylinder_free_y_release_time": float(args.cylinder_free_y_release_time),
+        "cylinder_free_theta_dof": bool(args.cylinder_free_theta_dof),
+        "cylinder_free_theta_inertia": float(args.cylinder_free_theta_inertia),
+        "cylinder_free_theta_damping": float(args.cylinder_free_theta_damping),
+        "cylinder_free_theta_stiffness": float(args.cylinder_free_theta_stiffness),
+        "cylinder_free_theta_moment_relaxation": float(args.cylinder_free_theta_moment_relaxation),
+        "cylinder_free_theta_max_angle_deg": float(args.cylinder_free_theta_max_angle_deg),
+        "cylinder_free_theta_max_angular_speed": float(args.cylinder_free_theta_max_angular_speed),
         "ibm_force_x": solver.last_ibm_force_x,
         "ibm_force_y": solver.last_ibm_force_y,
         "y_truncation_enabled": bool(args.y_truncation_enabled),
@@ -1225,15 +1486,27 @@ def _snapshot_metadata(args, solver) -> dict:
     }
     if args.cylinder:
         cx, cy, radius = _cylinder_center_at_time(args, solver.t)
-        if (args.cylinder_free_x_dof or args.cylinder_free_y_dof) and solver.ibm is not None:
-            free_state = solver.ibm.first_free_y_circle_state()
+        if (
+            args.cylinder_free_x_dof
+            or args.cylinder_free_y_dof
+            or args.cylinder_free_theta_dof
+        ) and solver.ibm is not None:
+            free_state = solver.ibm.first_free_y_circle_state(time=solver.t)
             if free_state is not None:
                 cx = free_state["center_x"]
                 cy = free_state["center_y"]
                 metadata["cylinder_free_x_velocity"] = free_state["velocity_x"]
                 metadata["cylinder_free_x_displacement"] = free_state["displacement_x"]
+                metadata["cylinder_free_x_active"] = free_state["active_x"]
+                metadata["cylinder_free_x_release_time"] = free_state["release_time_x"]
                 metadata["cylinder_free_y_velocity"] = free_state["velocity_y"]
                 metadata["cylinder_free_y_displacement"] = free_state["displacement_y"]
+                metadata["cylinder_free_y_active"] = free_state["active_y"]
+                metadata["cylinder_free_y_release_time"] = free_state["release_time_y"]
+                metadata["cylinder_free_theta_angle"] = free_state["angle"]
+                metadata["cylinder_free_theta_angle_deg"] = np.rad2deg(free_state["angle"])
+                metadata["cylinder_free_theta_angular_velocity"] = free_state["angular_velocity"]
+                metadata["ibm_moment_z"] = free_state["last_moment_z"]
         metadata["cylinder_center_x"] = cx
         metadata["cylinder_center_y"] = cy
         metadata["cylinder_radius"] = radius
@@ -1490,15 +1763,21 @@ def run(args, grid=None, grid_loaded_from_file=False):
         rotation_mode = _normalize_cylinder_rotation_mode(args.cylinder_rotation_mode)
         translation_cfg = _resolve_cylinder_translation(args, cx, cy, r)
         translation_mode = translation_cfg["mode"]
-        free_cylinder_dof = args.cylinder_free_x_dof or args.cylinder_free_y_dof
+        free_cylinder_dof = (
+            args.cylinder_free_x_dof
+            or args.cylinder_free_y_dof
+            or args.cylinder_free_theta_dof
+        )
         if free_cylinder_dof:
-            if ibm_shape != "circle":
-                raise ValueError("free cylinder DoF currently supports circle bodies only")
             if rotation_mode != "stationary" or translation_mode != "stationary":
                 raise ValueError(
                     "free cylinder DoF cannot be combined with prescribed "
                     "rotation or translation"
                 )
+            if args.cylinder_free_x_release_time < 0.0:
+                raise ValueError("cylinder_free_x_release_time must be non-negative")
+            if args.cylinder_free_y_release_time < 0.0:
+                raise ValueError("cylinder_free_y_release_time must be non-negative")
         if ibm_shape != "circle" and rotation_mode != "stationary":
             raise ValueError(
                 f"{ibm_shape} currently supports stationary IBM bodies only"
@@ -1561,6 +1840,20 @@ def run(args, grid=None, grid_loaded_from_file=False):
                 if args.cylinder_free_x_dof
                 else args.cylinder_free_y_max_speed
             )
+            free_indent_width = 0.0
+            free_indent_depth = 0.0
+            free_chord = -1.0
+            free_thickness_ratio = 0.12
+            free_angle_deg = 0.0
+            free_polygon_points = None
+            if ibm_shape == "circle-with-top-indent":
+                free_indent_width, free_indent_depth = _resolve_indent_geometry(args, r)
+            elif ibm_shape == "airfoil":
+                free_chord, free_thickness_ratio, free_angle_deg = (
+                    _resolve_airfoil_geometry(args, r)
+                )
+            elif ibm_shape == "polygon":
+                free_polygon_points, free_angle_deg = _resolve_polygon_geometry(args)
             ibm.add_free_y_circle(
                 cx,
                 cy,
@@ -1570,6 +1863,8 @@ def run(args, grid=None, grid_loaded_from_file=False):
                 stiffness=free_stiffness,
                 initial_velocity_x=args.cylinder_free_x_initial_velocity,
                 initial_velocity_y=args.cylinder_free_y_initial_velocity,
+                release_time_x=args.cylinder_free_x_release_time,
+                release_time_y=args.cylinder_free_y_release_time,
                 force_relaxation=free_force_relaxation,
                 max_displacement=(
                     0.01
@@ -1580,6 +1875,26 @@ def run(args, grid=None, grid_loaded_from_file=False):
                 max_speed=free_max_speed,
                 free_x=args.cylinder_free_x_dof,
                 free_y=args.cylinder_free_y_dof,
+                free_theta=args.cylinder_free_theta_dof,
+                inertia=args.cylinder_free_theta_inertia,
+                angular_damping=args.cylinder_free_theta_damping,
+                angular_stiffness=args.cylinder_free_theta_stiffness,
+                initial_angle=np.deg2rad(
+                    args.cylinder_free_theta_initial_angle_deg
+                ),
+                initial_angular_velocity=(
+                    args.cylinder_free_theta_initial_angular_velocity
+                ),
+                moment_relaxation=args.cylinder_free_theta_moment_relaxation,
+                max_angle=np.deg2rad(args.cylinder_free_theta_max_angle_deg),
+                max_angular_speed=args.cylinder_free_theta_max_angular_speed,
+                shape=ibm_shape,
+                indent_width=free_indent_width,
+                indent_depth=free_indent_depth,
+                chord=free_chord,
+                thickness_ratio=free_thickness_ratio,
+                angle_offset=free_angle_deg,
+                polygon_points=free_polygon_points,
             )
         elif translation_mode != "stationary":
             ibm.add_translating_circle(
@@ -1628,6 +1943,14 @@ def run(args, grid=None, grid_loaded_from_file=False):
                     thickness_ratio=thickness_ratio,
                     angle_deg=angle_deg,
                 )
+            elif ibm_shape == "polygon":
+                polygon_points, polygon_angle_deg = _resolve_polygon_geometry(args)
+                ibm.add_polygon(
+                    cx,
+                    cy,
+                    polygon_points,
+                    angle_deg=polygon_angle_deg,
+                )
             else:
                 ibm.add_circle(cx, cy, r)
         if is_root and args.verbose:
@@ -1651,12 +1974,20 @@ def run(args, grid=None, grid_loaded_from_file=False):
                     f"NACA 00{100.0 * thickness_ratio:.0f}, "
                     f"chord={chord:.4f}, alpha={angle_deg:.4g} deg"
                 )
+            elif ibm_shape == "polygon":
+                polygon_points, polygon_angle_deg = _resolve_polygon_geometry(args)
+                print(
+                    "  Polygon body : "
+                    f"vertices={len(polygon_points)}, "
+                    f"alpha={polygon_angle_deg:.4g} deg"
+                )
             if free_cylinder_dof:
                 free_axes = "".join(
                     axis
                     for axis, enabled in (
                         ("x", args.cylinder_free_x_dof),
                         ("y", args.cylinder_free_y_dof),
+                        ("theta", args.cylinder_free_theta_dof),
                     )
                     if enabled
                 )
@@ -1668,9 +1999,18 @@ def run(args, grid=None, grid_loaded_from_file=False):
                     f"k={free_stiffness:.4g}, "
                     f"vx0={args.cylinder_free_x_initial_velocity:.4g}, "
                     f"vy0={args.cylinder_free_y_initial_velocity:.4g}, "
+                    f"omega0={args.cylinder_free_theta_initial_angular_velocity:.4g}, "
                     f"relax={free_force_relaxation:.4g}, "
-                    f"max displacement={free_max_displacement_percent:.4g}% D, "
-                    f"max speed={free_max_speed:.4g}"
+                    f"release_x={args.cylinder_free_x_release_time:.4g}, "
+                    f"release_y={args.cylinder_free_y_release_time:.4g}, "
+                    "max displacement="
+                    f"{_format_free_displacement_percent(free_max_displacement_percent)}, "
+                    f"max speed={free_max_speed:.4g}, "
+                    f"I={args.cylinder_free_theta_inertia:.4g}, "
+                    f"c_theta={args.cylinder_free_theta_damping:.4g}, "
+                    f"k_theta={args.cylinder_free_theta_stiffness:.4g}, "
+                    f"max|theta|={args.cylinder_free_theta_max_angle_deg:.4g} deg, "
+                    f"max|omega|={args.cylinder_free_theta_max_angular_speed:.4g}"
                 )
             if rotation_mode == "oscillatory":
                 print(
@@ -1852,8 +2192,12 @@ def _plot_results(solver, grid, args):
         # Draw the immersed cylinder on every panel so geometry alignment
         # is visible in vorticity, pressure, and velocity plots.
         center_override = None
-        if (args.cylinder_free_x_dof or args.cylinder_free_y_dof) and solver.ibm is not None:
-            free_state = solver.ibm.first_free_y_circle_state()
+        if (
+            args.cylinder_free_x_dof
+            or args.cylinder_free_y_dof
+            or args.cylinder_free_theta_dof
+        ) and solver.ibm is not None:
+            free_state = solver.ibm.first_free_y_circle_state(time=solver.t)
             if free_state is not None:
                 center_override = (
                     free_state["center_x"],
@@ -2022,6 +2366,7 @@ def _run_auto_outputs(grid, args):
         args.auto_generate_coeff_history
         or args.auto_generate_aero_report
         or args.auto_generate_shedding_spectrum
+        or args.auto_generate_y_oscillation_strouhal
         or args.auto_generate_drag_decomposition
         or args.auto_generate_drag_decomposition_plot
     )
@@ -2123,6 +2468,34 @@ def _run_auto_outputs(grid, args):
             print(
                 "  Warning: automatic shedding-spectrum plot skipped because "
                 "the aerodynamic series was not generated."
+            )
+
+    if args.auto_generate_y_oscillation_strouhal:
+        if aero_ready:
+            try:
+                _, _, r = _resolve_cylinder_geometry(args)
+                char_length = 2.0 * r if args.cylinder else 1.0
+                plot_y_oscillation_strouhal(
+                    aero_series_path,
+                    indir=args.outdir,
+                    pattern="snap_*.npz",
+                    save_name="y_oscillation_strouhal.png",
+                    t_min=args.auto_aero_t_min,
+                    f_min=0.05,
+                    f_max=2.0,
+                    char_length=char_length,
+                    u_ref=args.inflow_u,
+                    results_dir=results_dir,
+                )
+            except Exception as exc:
+                print(
+                    "  Warning: automatic y-oscillation/Strouhal plot failed: "
+                    f"{exc}"
+                )
+        else:
+            print(
+                "  Warning: automatic y-oscillation/Strouhal plot skipped "
+                "because the aerodynamic series was not generated."
             )
 
     latest_snapshot = None

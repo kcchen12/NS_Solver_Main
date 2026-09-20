@@ -12,6 +12,7 @@ from main import (
     _airfoil_outline_points,
     _normalize_cylinder_experiment_mode,
     _normalize_cylinder_geometry_mode,
+    _parse_polygon_points,
     _normalize_cylinder_translation_mode,
     parse_args,
     _plot_ibm_outline,
@@ -54,6 +55,8 @@ def test_square_bluff_body_aliases():
     assert _normalize_cylinder_geometry_mode("square-cylinder") == "square"
     assert _normalize_cylinder_experiment_mode("naca0012") == "airfoil"
     assert _normalize_cylinder_geometry_mode("naca-0012") == "airfoil"
+    assert _normalize_cylinder_experiment_mode("custom") == "polygon"
+    assert _normalize_cylinder_geometry_mode("coordinates") == "polygon"
 
 
 def test_square_experiment_overrides_geometry_mode():
@@ -74,6 +77,19 @@ def test_airfoil_experiment_overrides_geometry_mode():
     )
 
     assert _resolve_experiment_overrides(args) == "airfoil"
+
+
+def test_polygon_coordinate_parser():
+    points = _parse_polygon_points("-0.3,-0.2; 0.3,-0.1; 0.2,0.25")
+
+    assert points.shape == (3, 2)
+    assert points[0, 0] == pytest.approx(-0.3)
+    assert points[2, 1] == pytest.approx(0.25)
+
+
+def test_polygon_coordinate_parser_rejects_too_few_points():
+    with pytest.raises(ValueError, match="at least three"):
+        _parse_polygon_points("0,0; 1,0")
 
 
 def test_translation_percentages_resolve_from_diameter():
@@ -217,6 +233,7 @@ def test_disabled_experimental_config_ignores_experimental_values(tmp_path, monk
     assert args.cylinder_free_x_force_relaxation == pytest.approx(0.05)
     assert args.cylinder_free_x_max_displacement_percent == pytest.approx(25.0)
     assert args.cylinder_free_x_max_speed == pytest.approx(0.25)
+    assert args.cylinder_free_x_release_time == pytest.approx(0.0)
     assert args.cylinder_experiment == "circle"
     assert args.cylinder_indent_width == 0.0
     assert args.cylinder_indent_depth == 0.0
@@ -229,6 +246,16 @@ def test_disabled_experimental_config_ignores_experimental_values(tmp_path, monk
     assert args.cylinder_free_y_force_relaxation == pytest.approx(0.05)
     assert args.cylinder_free_y_max_displacement_percent == pytest.approx(25.0)
     assert args.cylinder_free_y_max_speed == pytest.approx(0.25)
+    assert args.cylinder_free_y_release_time == pytest.approx(0.0)
+    assert not args.cylinder_free_theta_dof
+    assert args.cylinder_free_theta_inertia == pytest.approx(10.0)
+    assert args.cylinder_free_theta_damping == pytest.approx(1.0)
+    assert args.cylinder_free_theta_stiffness == pytest.approx(5.0)
+    assert args.cylinder_free_theta_initial_angle_deg == pytest.approx(0.0)
+    assert args.cylinder_free_theta_initial_angular_velocity == pytest.approx(0.0)
+    assert args.cylinder_free_theta_moment_relaxation == pytest.approx(0.05)
+    assert args.cylinder_free_theta_max_angle_deg == pytest.approx(45.0)
+    assert args.cylinder_free_theta_max_angular_speed == pytest.approx(1.0)
     assert args.ny == 64
     assert args.y_min == pytest.approx(-2.0)
     assert args.y_max == pytest.approx(2.0)
@@ -252,6 +279,7 @@ def test_enabled_experimental_config_reads_experimental_values(tmp_path, monkeyp
                 "cylinder_free_x_force_relaxation = 0.2",
                 "cylinder_free_x_max_displacement_percent = 15.0",
                 "cylinder_free_x_max_speed = 0.4",
+                "cylinder_free_x_release_time = 100.0",
                 "cylinder_free_y_dof = true",
                 "cylinder_free_y_mass = 2.0",
                 "cylinder_free_y_damping = 0.3",
@@ -260,6 +288,16 @@ def test_enabled_experimental_config_reads_experimental_values(tmp_path, monkeyp
                 "cylinder_free_y_force_relaxation = 0.2",
                 "cylinder_free_y_max_displacement_percent = 15.0",
                 "cylinder_free_y_max_speed = 0.4",
+                "cylinder_free_y_release_time = 120.0",
+                "cylinder_free_theta_dof = true",
+                "cylinder_free_theta_inertia = 3.0",
+                "cylinder_free_theta_damping = 0.7",
+                "cylinder_free_theta_stiffness = 6.0",
+                "cylinder_free_theta_initial_angle_deg = 2.5",
+                "cylinder_free_theta_initial_angular_velocity = 0.06",
+                "cylinder_free_theta_moment_relaxation = 0.25",
+                "cylinder_free_theta_max_angle_deg = 20.0",
+                "cylinder_free_theta_max_angular_speed = 0.8",
             ]
         ),
     )
@@ -292,6 +330,7 @@ def test_enabled_experimental_config_reads_experimental_values(tmp_path, monkeyp
     assert args.cylinder_free_x_force_relaxation == pytest.approx(0.2)
     assert args.cylinder_free_x_max_displacement_percent == pytest.approx(15.0)
     assert args.cylinder_free_x_max_speed == pytest.approx(0.4)
+    assert args.cylinder_free_x_release_time == pytest.approx(100.0)
     assert args.cylinder_free_y_dof
     assert args.cylinder_free_y_mass == pytest.approx(2.0)
     assert args.cylinder_free_y_damping == pytest.approx(0.3)
@@ -300,7 +339,53 @@ def test_enabled_experimental_config_reads_experimental_values(tmp_path, monkeyp
     assert args.cylinder_free_y_force_relaxation == pytest.approx(0.2)
     assert args.cylinder_free_y_max_displacement_percent == pytest.approx(15.0)
     assert args.cylinder_free_y_max_speed == pytest.approx(0.4)
+    assert args.cylinder_free_y_release_time == pytest.approx(120.0)
+    assert args.cylinder_free_theta_dof
+    assert args.cylinder_free_theta_inertia == pytest.approx(3.0)
+    assert args.cylinder_free_theta_damping == pytest.approx(0.7)
+    assert args.cylinder_free_theta_stiffness == pytest.approx(6.0)
+    assert args.cylinder_free_theta_initial_angle_deg == pytest.approx(2.5)
+    assert args.cylinder_free_theta_initial_angular_velocity == pytest.approx(0.06)
+    assert args.cylinder_free_theta_moment_relaxation == pytest.approx(0.25)
+    assert args.cylinder_free_theta_max_angle_deg == pytest.approx(20.0)
+    assert args.cylinder_free_theta_max_angular_speed == pytest.approx(0.8)
     assert args.ny == 44
+
+
+def test_enabled_experimental_config_allows_free_displacement_clamp_off(
+    tmp_path,
+    monkeypatch,
+):
+    config_path, experiment_path, post_path = _write_minimal_configs(
+        tmp_path,
+        "\n".join(
+            [
+                "enable_experimental_config = true",
+                "cylinder_free_x_dof = true",
+                "cylinder_free_x_max_displacement_percent = off",
+                "cylinder_free_y_dof = true",
+                "cylinder_free_y_max_displacement_percent = off",
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "main.py",
+            "--config",
+            str(config_path),
+            "--experiment-config",
+            str(experiment_path),
+            "--post-config",
+            str(post_path),
+        ],
+    )
+
+    args = parse_args()
+
+    assert np.isinf(args.cylinder_free_x_max_displacement_percent)
+    assert np.isinf(args.cylinder_free_y_max_displacement_percent)
 
 
 def test_enabled_experimental_config_reads_square_body(tmp_path, monkeypatch):

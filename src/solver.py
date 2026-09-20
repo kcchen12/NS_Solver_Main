@@ -209,7 +209,7 @@ class FractionalStepSolver:
                 self.last_ibm_forcing_v[:, :-1] +
                 self.last_ibm_forcing_v[:, 1:]
             )
-            self.ibm.advance_free_y_circles(dt)
+            self.ibm.advance_free_y_circles(dt, time=self.t + dt)
             self.ibm.apply(u_star, v_star, time=self.t + dt)
 
         self.u = u_star

@@ -124,10 +124,14 @@ Initialization and runtime:
 
 - `enable_experimental_config`: master switch; when `false`, all other options in `experimental_config.txt` are ignored
 - `truncate_y_cells`: drop this many cells from both the bottom and top y boundaries before running
-- `cylinder_experiment`: body shape selector, one of `circle`, `top-indent`, `square`, or `airfoil`
-- `cylinder_free_x_dof`, `cylinder_free_y_dof`: enable streamwise and/or transverse spring-mass-damper cylinder motion for VIV studies
-- `cylinder_free_x_mass`, `cylinder_free_y_mass`, `cylinder_free_x_damping`, `cylinder_free_y_damping`, `cylinder_free_x_stiffness`, `cylinder_free_y_stiffness`: spring-mass-damper parameters for the free cylinder
+- `cylinder_experiment`: body shape selector, one of `circle`, `top-indent`, `square`, `airfoil`, or `polygon`
+- `polygon_points`, `polygon_angle_deg`: custom body-local vertices and initial orientation when `cylinder_experiment = polygon`
+- `cylinder_free_x_dof`, `cylinder_free_y_dof`, `cylinder_free_theta_dof`: enable streamwise, transverse, and/or angular spring-mass-damper motion for the selected bluff body
+- `cylinder_free_x_mass`, `cylinder_free_y_mass`, `cylinder_free_x_damping`, `cylinder_free_y_damping`, `cylinder_free_x_stiffness`, `cylinder_free_y_stiffness`: spring-mass-damper parameters for the free body
 - `cylinder_free_x_initial_velocity`, `cylinder_free_y_initial_velocity`: initial streamwise/transverse cylinder velocity
+- `cylinder_free_x_max_displacement_percent`, `cylinder_free_y_max_displacement_percent`: displacement clamp as percent of body diameter; set to `off` to disable the clamp
+- `cylinder_free_x_release_time`, `cylinder_free_y_release_time`: hold the corresponding free axis fixed until this simulation time; `0` releases immediately
+- `cylinder_free_theta_inertia`, `cylinder_free_theta_damping`, `cylinder_free_theta_stiffness`: torsional oscillator parameters for angular body motion
 - `cylinder_indent_width`, `cylinder_indent_depth`
 
 ### Post Config
@@ -137,6 +141,7 @@ Initialization and runtime:
 - `auto_generate_coeff_history`: automatically generate `results/coeff_history.png`
 - `auto_generate_aero_report`: automatically generate `results/aero_report.txt`
 - `auto_generate_shedding_spectrum`: automatically generate `results/shedding_spectrum.png`
+- `auto_generate_y_oscillation_strouhal`: automatically generate `results/y_oscillation_strouhal.png`
 - `auto_generate_drag_decomposition`: automatically generate `results/drag_decomposition.csv`
 - `auto_generate_drag_decomposition_plot`: automatically generate `results/drag_decomposition.png`
 - `auto_generate_pressure_coefficient_theta`: automatically generate `results/pressure_coefficient_theta.csv` and `results/pressure_coefficient_theta.png`

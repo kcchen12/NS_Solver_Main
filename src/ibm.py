@@ -103,39 +103,97 @@ class FreeYCircleSpec:
     force_relaxation: float
     max_displacement: float
     max_speed: float
+    inertia: float
+    angular_damping: float
+    angular_stiffness: float
+    moment_relaxation: float
+    max_angle: float
+    max_angular_speed: float
     x: float
     y: float
     velocity_x: float
     velocity_y: float
+    initial_velocity_x: float
+    initial_velocity_y: float
+    release_time_x: float
+    release_time_y: float
+    released_x: bool
+    released_y: bool
+    angle: float
+    angular_velocity: float
     free_x: bool
     free_y: bool
+    free_theta: bool
+    shape: str
+    indent_width: float
+    indent_depth: float
+    chord: float
+    thickness_ratio: float
+    angle_offset: float
+    polygon_points: np.ndarray
     mask_u: np.ndarray
     mask_v: np.ndarray
     last_force_x: float = 0.0
     last_force_y: float = 0.0
+    last_moment_z: float = 0.0
 
     def center(self, time: float = 0.0) -> tuple[float, float]:
         del time
         return float(self.x), float(self.y)
 
-    def velocity(self, time: float = 0.0) -> tuple[float, float]:
-        del time
-        return float(self.velocity_x), float(self.velocity_y)
+    def x_active(self, time: float = 0.0) -> bool:
+        return bool(self.free_x and float(time) >= self.release_time_x)
 
-    def advance(self, force_x: float, force_y: float, dt: float) -> None:
+    def y_active(self, time: float = 0.0) -> bool:
+        return bool(self.free_y and float(time) >= self.release_time_y)
+
+    def velocity(self, time: float = 0.0) -> tuple[float, float]:
+        return (
+            float(self.velocity_x if self.x_active(time) else 0.0),
+            float(self.velocity_y if self.y_active(time) else 0.0),
+        )
+
+    def u_velocity_at(self, y_coords: np.ndarray, time: float = 0.0) -> np.ndarray:
+        velocity_x = self.velocity_x if self.x_active(time) else 0.0
+        return velocity_x - self.angular_velocity * (y_coords - self.y)
+
+    def v_velocity_at(self, x_coords: np.ndarray, time: float = 0.0) -> np.ndarray:
+        velocity_y = self.velocity_y if self.y_active(time) else 0.0
+        return velocity_y + self.angular_velocity * (x_coords - self.x)
+
+    def body_angle_deg(self) -> float:
+        return float(self.angle_offset + np.rad2deg(self.angle))
+
+    def advance(
+        self,
+        force_x: float,
+        force_y: float,
+        moment_z: float,
+        dt: float,
+        time: float = 0.0,
+    ) -> None:
         if not np.isfinite(force_x):
             raise FloatingPointError("free-x cylinder force is not finite")
         if not np.isfinite(force_y):
             raise FloatingPointError("free-y cylinder force is not finite")
+        if not np.isfinite(moment_z):
+            raise FloatingPointError("free-theta cylinder moment is not finite")
         if (
             not np.isfinite(self.x)
             or not np.isfinite(self.y)
             or not np.isfinite(self.velocity_x)
             or not np.isfinite(self.velocity_y)
+            or not np.isfinite(self.angle)
+            or not np.isfinite(self.angular_velocity)
         ):
             raise FloatingPointError("free cylinder state is not finite")
 
-        if self.free_x:
+        if self.free_x and not self.x_active(time):
+            self.velocity_x = 0.0
+        if self.free_x and self.x_active(time):
+            if not self.released_x:
+                self.velocity_x = float(self.initial_velocity_x)
+                self.released_x = True
             displacement_x = self.x - self.cx0
             acceleration_x = (
                 float(force_x)
@@ -149,15 +207,23 @@ class FreeYCircleSpec:
                 np.clip(self.velocity_x, -self.max_speed, self.max_speed)
             )
             self.x += float(dt) * self.velocity_x
-            self.x = float(
-                np.clip(
-                    self.x,
-                    self.cx0 - self.max_displacement,
-                    self.cx0 + self.max_displacement,
-                )
-            )
+            x_min = self.cx0 - self.max_displacement
+            x_max = self.cx0 + self.max_displacement
+            if self.x <= x_min:
+                self.x = float(x_min)
+                if self.velocity_x < 0.0:
+                    self.velocity_x = 0.0
+            elif self.x >= x_max:
+                self.x = float(x_max)
+                if self.velocity_x > 0.0:
+                    self.velocity_x = 0.0
 
-        if self.free_y:
+        if self.free_y and not self.y_active(time):
+            self.velocity_y = 0.0
+        if self.free_y and self.y_active(time):
+            if not self.released_y:
+                self.velocity_y = float(self.initial_velocity_y)
+                self.released_y = True
             displacement_y = self.y - self.cy0
             acceleration_y = (
                 float(force_y)
@@ -171,13 +237,44 @@ class FreeYCircleSpec:
                 np.clip(self.velocity_y, -self.max_speed, self.max_speed)
             )
             self.y += float(dt) * self.velocity_y
-            self.y = float(
+            y_min = self.cy0 - self.max_displacement
+            y_max = self.cy0 + self.max_displacement
+            if self.y <= y_min:
+                self.y = float(y_min)
+                if self.velocity_y < 0.0:
+                    self.velocity_y = 0.0
+            elif self.y >= y_max:
+                self.y = float(y_max)
+                if self.velocity_y > 0.0:
+                    self.velocity_y = 0.0
+
+        if self.free_theta:
+            angular_acceleration = (
+                float(moment_z)
+                - self.angular_damping * self.angular_velocity
+                - self.angular_stiffness * self.angle
+            ) / self.inertia
+            if not np.isfinite(angular_acceleration):
+                raise FloatingPointError(
+                    "free-theta cylinder angular acceleration is not finite"
+                )
+            self.angular_velocity += float(dt) * angular_acceleration
+            self.angular_velocity = float(
                 np.clip(
-                    self.y,
-                    self.cy0 - self.max_displacement,
-                    self.cy0 + self.max_displacement,
+                    self.angular_velocity,
+                    -self.max_angular_speed,
+                    self.max_angular_speed,
                 )
             )
+            self.angle += float(dt) * self.angular_velocity
+            if self.angle <= -self.max_angle:
+                self.angle = float(-self.max_angle)
+                if self.angular_velocity < 0.0:
+                    self.angular_velocity = 0.0
+            elif self.angle >= self.max_angle:
+                self.angle = float(self.max_angle)
+                if self.angular_velocity > 0.0:
+                    self.angular_velocity = 0.0
 
     def record_force(self, raw_force_x: float, raw_force_y: float) -> None:
         if not np.isfinite(raw_force_x):
@@ -187,6 +284,14 @@ class FreeYCircleSpec:
         alpha = float(np.clip(self.force_relaxation, 0.0, 1.0))
         self.last_force_x = (1.0 - alpha) * self.last_force_x + alpha * raw_force_x
         self.last_force_y = (1.0 - alpha) * self.last_force_y + alpha * raw_force_y
+
+    def record_moment(self, raw_moment_z: float) -> None:
+        if not np.isfinite(raw_moment_z):
+            raise FloatingPointError("free-theta cylinder raw moment is not finite")
+        alpha = float(np.clip(self.moment_relaxation, 0.0, 1.0))
+        self.last_moment_z = (
+            (1.0 - alpha) * self.last_moment_z + alpha * raw_moment_z
+        )
 
 
 class ImmersedBoundary:
@@ -302,6 +407,70 @@ class ImmersedBoundary:
             & (y_coords <= y1)
         )
 
+    @staticmethod
+    def _body_local_coords(
+        x_coords: np.ndarray,
+        y_coords: np.ndarray,
+        cx: float,
+        cy: float,
+        angle_deg: float,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        angle = np.deg2rad(float(angle_deg))
+        cos_a = np.cos(angle)
+        sin_a = np.sin(angle)
+        x_rel = x_coords - float(cx)
+        y_rel = y_coords - float(cy)
+        return (
+            cos_a * x_rel + sin_a * y_rel,
+            -sin_a * x_rel + cos_a * y_rel,
+        )
+
+    @classmethod
+    def _rotated_rectangle_mask(
+        cls,
+        x_coords: np.ndarray,
+        y_coords: np.ndarray,
+        cx: float,
+        cy: float,
+        half_width: float,
+        half_height: float,
+        angle_deg: float,
+    ) -> np.ndarray:
+        x_local, y_local = cls._body_local_coords(
+            x_coords, y_coords, cx, cy, angle_deg
+        )
+        return (
+            (np.abs(x_local) <= float(half_width))
+            & (np.abs(y_local) <= float(half_height))
+        )
+
+    @classmethod
+    def _circle_with_top_indent_mask(
+        cls,
+        x_coords: np.ndarray,
+        y_coords: np.ndarray,
+        cx: float,
+        cy: float,
+        radius: float,
+        indent_width: float,
+        indent_depth: float,
+        angle_deg: float = 0.0,
+    ) -> np.ndarray:
+        x_local, y_local = cls._body_local_coords(
+            x_coords, y_coords, cx, cy, angle_deg
+        )
+        circle = x_local ** 2 + y_local ** 2 <= float(radius) ** 2
+        if indent_width <= 0.0 or indent_depth <= 0.0:
+            return circle
+        half_width = 0.5 * float(indent_width)
+        notch = (
+            (x_local >= -half_width)
+            & (x_local <= half_width)
+            & (y_local >= float(radius) - float(indent_depth))
+            & (y_local <= float(radius))
+        )
+        return circle & ~notch
+
     def _circle_with_top_indent_masks(
         self,
         cx: float,
@@ -314,16 +483,26 @@ class ImmersedBoundary:
 
         xf = grid.xf[:, np.newaxis]
         yc = grid.yc[np.newaxis, :]
-        mask_u = self._circle_mask(xf, yc, cx, cy, radius)
-        mask_u &= ~self._top_indent_mask(
-            xf, yc, cx, cy, radius, indent_width, indent_depth
+        mask_u = self._circle_with_top_indent_mask(
+            xf,
+            yc,
+            cx,
+            cy,
+            radius,
+            indent_width,
+            indent_depth,
         )
 
         xc = grid.xc[:, np.newaxis]
         yf = grid.yf[np.newaxis, :]
-        mask_v = self._circle_mask(xc, yf, cx, cy, radius)
-        mask_v &= ~self._top_indent_mask(
-            xc, yf, cx, cy, radius, indent_width, indent_depth
+        mask_v = self._circle_with_top_indent_mask(
+            xc,
+            yf,
+            cx,
+            cy,
+            radius,
+            indent_width,
+            indent_depth,
         )
         return mask_u, mask_v
 
@@ -383,6 +562,155 @@ class ImmersedBoundary:
             & (x_local <= chord)
             & (np.abs(y_local) <= y_thickness)
         )
+
+    @classmethod
+    def _polygon_mask(
+        cls,
+        x_coords: np.ndarray,
+        y_coords: np.ndarray,
+        cx: float,
+        cy: float,
+        points: np.ndarray,
+        angle_deg: float = 0.0,
+    ) -> np.ndarray:
+        polygon = np.asarray(points, dtype=float)
+        if polygon.ndim != 2 or polygon.shape[1] != 2 or polygon.shape[0] < 3:
+            raise ValueError("polygon points must be an Nx2 array with N >= 3")
+
+        x_local, y_local = cls._body_local_coords(
+            x_coords, y_coords, cx, cy, angle_deg
+        )
+        inside = np.zeros_like(x_local, dtype=bool)
+        xj, yj = polygon[-1]
+        eps = np.finfo(float).eps
+        for xi, yi in polygon:
+            crosses = ((yi > y_local) != (yj > y_local)) & (
+                x_local
+                < (xj - xi) * (y_local - yi) / ((yj - yi) + eps) + xi
+            )
+            inside ^= crosses
+            xj, yj = xi, yi
+        return inside
+
+    def _free_body_masks(self, spec: FreeYCircleSpec) -> tuple[np.ndarray, np.ndarray]:
+        cx, cy = spec.center()
+        shape = spec.shape
+        if shape == "circle":
+            return (
+                self._circle_mask(self._u_x, self._u_y, cx, cy, spec.radius),
+                self._circle_mask(self._v_x, self._v_y, cx, cy, spec.radius),
+            )
+        if shape == "circle-with-top-indent":
+            return (
+                self._circle_with_top_indent_mask(
+                    self._u_x,
+                    self._u_y,
+                    cx,
+                    cy,
+                    spec.radius,
+                    spec.indent_width,
+                    spec.indent_depth,
+                    spec.body_angle_deg(),
+                ),
+                self._circle_with_top_indent_mask(
+                    self._v_x,
+                    self._v_y,
+                    cx,
+                    cy,
+                    spec.radius,
+                    spec.indent_width,
+                    spec.indent_depth,
+                    spec.body_angle_deg(),
+                ),
+            )
+        if shape == "square":
+            return (
+                self._rotated_rectangle_mask(
+                    self._u_x,
+                    self._u_y,
+                    cx,
+                    cy,
+                    spec.radius,
+                    spec.radius,
+                    spec.body_angle_deg(),
+                ),
+                self._rotated_rectangle_mask(
+                    self._v_x,
+                    self._v_y,
+                    cx,
+                    cy,
+                    spec.radius,
+                    spec.radius,
+                    spec.body_angle_deg(),
+                ),
+            )
+        if shape == "airfoil":
+            return (
+                self._naca_00xx_mask(
+                    self._u_x,
+                    self._u_y,
+                    cx,
+                    cy,
+                    spec.chord,
+                    spec.thickness_ratio,
+                    spec.body_angle_deg(),
+                ),
+                self._naca_00xx_mask(
+                    self._v_x,
+                    self._v_y,
+                    cx,
+                    cy,
+                    spec.chord,
+                    spec.thickness_ratio,
+                    spec.body_angle_deg(),
+                ),
+            )
+        if shape == "polygon":
+            return (
+                self._polygon_mask(
+                    self._u_x,
+                    self._u_y,
+                    cx,
+                    cy,
+                    spec.polygon_points,
+                    spec.body_angle_deg(),
+                ),
+                self._polygon_mask(
+                    self._v_x,
+                    self._v_y,
+                    cx,
+                    cy,
+                    spec.polygon_points,
+                    spec.body_angle_deg(),
+                ),
+            )
+        raise ValueError(f"unsupported free body shape: {shape}")
+
+    def _free_body_force_weights(
+        self,
+        spec: FreeYCircleSpec,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        cx, cy = spec.center()
+        if spec.shape == "circle":
+            return (
+                self._circle_force_weight(
+                    self._u_x,
+                    self._u_y,
+                    cx,
+                    cy,
+                    spec.radius,
+                    self._force_regularization_width,
+                ),
+                self._circle_force_weight(
+                    self._v_x,
+                    self._v_y,
+                    cx,
+                    cy,
+                    spec.radius,
+                    self._force_regularization_width,
+                ),
+            )
+        return spec.mask_u.astype(float), spec.mask_v.astype(float)
 
     # ------------------------------------------------------------------
     # Geometry builders
@@ -481,6 +809,41 @@ class ImmersedBoundary:
             cy,
             chord,
             thickness_ratio,
+            angle_deg,
+        )
+        self._base_mask_u |= mask_u
+        self._base_mask_v |= mask_v
+        self.mask_u |= mask_u
+        self.mask_v |= mask_v
+
+    def add_polygon(
+        self,
+        cx: float,
+        cy: float,
+        points: np.ndarray,
+        angle_deg: float = 0.0,
+        u_body: float = 0.0,
+        v_body: float = 0.0,
+    ) -> None:
+        """Mark a user-defined polygon bluff body as a stationary solid body."""
+        del u_body, v_body
+        polygon = np.asarray(points, dtype=float)
+        if polygon.ndim != 2 or polygon.shape[1] != 2 or polygon.shape[0] < 3:
+            raise ValueError("polygon points must be an Nx2 array with N >= 3")
+        mask_u = self._polygon_mask(
+            self._u_x,
+            self._u_y,
+            cx,
+            cy,
+            polygon,
+            angle_deg,
+        )
+        mask_v = self._polygon_mask(
+            self._v_x,
+            self._v_y,
+            cx,
+            cy,
+            polygon,
             angle_deg,
         )
         self._base_mask_u |= mask_u
@@ -614,18 +977,38 @@ class ImmersedBoundary:
         free_x: bool = False,
         free_y: bool = True,
         initial_velocity_x: float = 0.0,
+        release_time_x: float = 0.0,
+        release_time_y: float = 0.0,
+        free_theta: bool = False,
+        inertia: float = 10.0,
+        angular_damping: float = 1.0,
+        angular_stiffness: float = 5.0,
+        initial_angle: float = 0.0,
+        initial_angular_velocity: float = 0.0,
+        moment_relaxation: float = 0.05,
+        max_angle: float = np.pi / 4.0,
+        max_angular_speed: float = 1.0,
+        shape: str = "circle",
+        indent_width: float = 0.0,
+        indent_depth: float = 0.0,
+        chord: float = -1.0,
+        thickness_ratio: float = 0.12,
+        angle_offset: float = 0.0,
+        polygon_points: np.ndarray | None = None,
     ) -> None:
-        """Add a circular cylinder with free spring-mass-damper motion.
+        """Add a bluff body with free spring-mass-damper motion.
 
         Each enabled direction follows a spring-mass-damper model driven by
         the matching computed IBM force:
 
             mass*x'' + damping*x' + stiffness*(x - cx) = F_x
             mass*y'' + damping*y' + stiffness*(y - cy) = F_y
+            inertia*theta'' + angular_damping*theta'
+                + angular_stiffness*theta = M_z
         """
         if radius <= 0.0:
             raise ValueError("radius must be positive")
-        if not free_x and not free_y:
+        if not free_x and not free_y and not free_theta:
             raise ValueError("at least one free direction must be enabled")
         if mass <= 0.0:
             raise ValueError("mass must be positive")
@@ -641,32 +1024,99 @@ class ImmersedBoundary:
             raise ValueError("max_displacement must be positive")
         if max_speed <= 0.0:
             raise ValueError("max_speed must be positive")
+        if release_time_x < 0.0:
+            raise ValueError("release_time_x must be non-negative")
+        if release_time_y < 0.0:
+            raise ValueError("release_time_y must be non-negative")
+        if inertia <= 0.0:
+            raise ValueError("inertia must be positive")
+        if angular_damping < 0.0:
+            raise ValueError("angular_damping must be non-negative")
+        if angular_stiffness < 0.0:
+            raise ValueError("angular_stiffness must be non-negative")
+        if moment_relaxation <= 0.0 or moment_relaxation > 1.0:
+            raise ValueError("moment_relaxation must be in (0, 1]")
+        if max_angle <= 0.0:
+            raise ValueError("max_angle must be positive")
+        if max_angular_speed <= 0.0:
+            raise ValueError("max_angular_speed must be positive")
+        shape = str(shape).strip().lower()
+        if shape not in {
+            "circle",
+            "circle-with-top-indent",
+            "square",
+            "airfoil",
+            "polygon",
+        }:
+            raise ValueError(f"unsupported free body shape: {shape}")
+        if shape == "circle-with-top-indent":
+            if indent_width <= 0.0 or indent_depth <= 0.0:
+                raise ValueError("indent_width and indent_depth must be positive")
+            if indent_width >= 2.0 * radius:
+                raise ValueError("indent_width must be smaller than the body diameter")
+            if indent_depth >= 2.0 * radius:
+                raise ValueError("indent_depth must be smaller than the body diameter")
+        if shape == "airfoil":
+            if chord <= 0.0:
+                chord = 2.0 * float(radius)
+            if thickness_ratio <= 0.0:
+                raise ValueError("thickness_ratio must be positive")
+        else:
+            chord = 2.0 * float(radius) if chord <= 0.0 else float(chord)
+        if shape == "polygon":
+            polygon = np.asarray(polygon_points, dtype=float)
+            if polygon.ndim != 2 or polygon.shape[1] != 2 or polygon.shape[0] < 3:
+                raise ValueError("polygon_points must be an Nx2 array with N >= 3")
+        else:
+            polygon = np.zeros((0, 2), dtype=float)
 
-        mask_u = self._circle_mask(self._u_x, self._u_y, cx, cy, radius)
-        mask_v = self._circle_mask(self._v_x, self._v_y, cx, cy, radius)
+        spec = FreeYCircleSpec(
+            cx0=float(cx),
+            cy0=float(cy),
+            radius=float(radius),
+            mass=float(mass),
+            damping=float(damping),
+            stiffness=float(stiffness),
+            force_relaxation=float(force_relaxation),
+            max_displacement=float(max_displacement),
+            max_speed=float(max_speed),
+            inertia=float(inertia),
+            angular_damping=float(angular_damping),
+            angular_stiffness=float(angular_stiffness),
+            moment_relaxation=float(moment_relaxation),
+            max_angle=float(max_angle),
+            max_angular_speed=float(max_angular_speed),
+            x=float(cx),
+            y=float(cy),
+            velocity_x=float(initial_velocity_x if release_time_x <= 0.0 else 0.0),
+            velocity_y=float(initial_velocity_y if release_time_y <= 0.0 else 0.0),
+            initial_velocity_x=float(initial_velocity_x),
+            initial_velocity_y=float(initial_velocity_y),
+            release_time_x=float(release_time_x),
+            release_time_y=float(release_time_y),
+            released_x=bool(release_time_x <= 0.0),
+            released_y=bool(release_time_y <= 0.0),
+            angle=float(initial_angle),
+            angular_velocity=float(initial_angular_velocity),
+            free_x=bool(free_x),
+            free_y=bool(free_y),
+            free_theta=bool(free_theta),
+            shape=shape,
+            indent_width=float(indent_width),
+            indent_depth=float(indent_depth),
+            chord=float(chord),
+            thickness_ratio=float(thickness_ratio),
+            angle_offset=float(angle_offset),
+            polygon_points=polygon,
+            mask_u=np.zeros(self.grid.u_shape, dtype=bool),
+            mask_v=np.zeros(self.grid.v_shape, dtype=bool),
+        )
+        mask_u, mask_v = self._free_body_masks(spec)
+        spec.mask_u = mask_u
+        spec.mask_v = mask_v
         self.mask_u = self._base_mask_u | mask_u
         self.mask_v = self._base_mask_v | mask_v
-        self.free_y_circles.append(
-            FreeYCircleSpec(
-                cx0=float(cx),
-                cy0=float(cy),
-                radius=float(radius),
-                mass=float(mass),
-                damping=float(damping),
-                stiffness=float(stiffness),
-                force_relaxation=float(force_relaxation),
-                max_displacement=float(max_displacement),
-                max_speed=float(max_speed),
-                x=float(cx),
-                y=float(cy),
-                velocity_x=float(initial_velocity_x),
-                velocity_y=float(initial_velocity_y),
-                free_x=bool(free_x),
-                free_y=bool(free_y),
-                mask_u=mask_u,
-                mask_v=mask_v,
-            )
-        )
+        self.free_y_circles.append(spec)
 
     def add_rectangle(self, x0: float, x1: float,
                       y0: float, y1: float,
@@ -717,9 +1167,16 @@ class ImmersedBoundary:
         self.mask_u = self._base_mask_u.copy()
         self.mask_v = self._base_mask_v.copy()
         for spec in moving_circles:
-            cx, cy = spec.center(time)
-            spec.mask_u = self._circle_mask(self._u_x, self._u_y, cx, cy, spec.radius)
-            spec.mask_v = self._circle_mask(self._v_x, self._v_y, cx, cy, spec.radius)
+            if isinstance(spec, FreeYCircleSpec):
+                spec.mask_u, spec.mask_v = self._free_body_masks(spec)
+            else:
+                cx, cy = spec.center(time)
+                spec.mask_u = self._circle_mask(
+                    self._u_x, self._u_y, cx, cy, spec.radius
+                )
+                spec.mask_v = self._circle_mask(
+                    self._v_x, self._v_y, cx, cy, spec.radius
+                )
             self.mask_u |= spec.mask_u
             self.mask_v |= spec.mask_v
 
@@ -735,44 +1192,63 @@ class ImmersedBoundary:
         force_y = 0.0
         for spec in [*self.translating_circles, *self.free_y_circles]:
             cx, cy = spec.center(time)
-            u_body_t, v_body_t = spec.velocity(time)
-            weight_u = self._circle_force_weight(
-                self._u_x,
-                self._u_y,
-                cx,
-                cy,
-                spec.radius,
-                self._force_regularization_width,
-            )
-            weight_v = self._circle_force_weight(
-                self._v_x,
-                self._v_y,
-                cx,
-                cy,
-                spec.radius,
-                self._force_regularization_width,
-            )
-            raw_force_x = float(
-                np.sum((u - u_body_t) * self._u_face_measure * weight_u)
-            )
-            raw_force_y = float(
-                np.sum((v - v_body_t) * self._v_face_measure * weight_v)
-            )
+            if isinstance(spec, FreeYCircleSpec):
+                weight_u, weight_v = self._free_body_force_weights(spec)
+                u_body_field = spec.u_velocity_at(self._u_y, time=time)
+                v_body_field = spec.v_velocity_at(self._v_x, time=time)
+                force_u = (u - u_body_field) * self._u_face_measure * weight_u
+                force_v = (v - v_body_field) * self._v_face_measure * weight_v
+                raw_force_x = float(np.sum(force_u))
+                raw_force_y = float(np.sum(force_v))
+                raw_moment_z = float(
+                    np.sum(-(self._u_y - cy) * force_u)
+                    + np.sum((self._v_x - cx) * force_v)
+                )
+                spec.record_force(rho * raw_force_x / dt, rho * raw_force_y / dt)
+                spec.record_moment(rho * raw_moment_z / dt)
+            else:
+                weight_u = self._circle_force_weight(
+                    self._u_x,
+                    self._u_y,
+                    cx,
+                    cy,
+                    spec.radius,
+                    self._force_regularization_width,
+                )
+                weight_v = self._circle_force_weight(
+                    self._v_x,
+                    self._v_y,
+                    cx,
+                    cy,
+                    spec.radius,
+                    self._force_regularization_width,
+                )
+                u_body_t, v_body_t = spec.velocity(time)
+                raw_force_x = float(
+                    np.sum((u - u_body_t) * self._u_face_measure * weight_u)
+                )
+                raw_force_y = float(
+                    np.sum((v - v_body_t) * self._v_face_measure * weight_v)
+                )
             force_x += raw_force_x
             force_y += raw_force_y
-            if isinstance(spec, FreeYCircleSpec):
-                spec.record_force(rho * raw_force_x / dt, rho * raw_force_y / dt)
         return rho * force_x / dt, rho * force_y / dt
 
-    def advance_free_y_circles(self, dt: float) -> None:
+    def advance_free_y_circles(self, dt: float, time: float = 0.0) -> None:
         """Advance free cylinders using their latest IBM forces."""
         if dt <= 0.0:
             return
         for spec in self.free_y_circles:
-            spec.advance(spec.last_force_x, spec.last_force_y, dt)
+            spec.advance(
+                spec.last_force_x,
+                spec.last_force_y,
+                spec.last_moment_z,
+                dt,
+                time=time,
+            )
         self._refresh_moving_circles(0.0)
 
-    def first_free_y_circle_state(self) -> dict | None:
+    def first_free_y_circle_state(self, time: float = 0.0) -> dict | None:
         if not self.free_y_circles:
             return None
         spec = self.free_y_circles[0]
@@ -783,18 +1259,33 @@ class ImmersedBoundary:
             "reference_y": float(spec.cy0),
             "velocity_x": float(spec.velocity_x),
             "velocity_y": float(spec.velocity_y),
+            "active_x": bool(spec.x_active(time)),
+            "active_y": bool(spec.y_active(time)),
             "displacement_x": float(spec.x - spec.cx0),
             "displacement_y": float(spec.y - spec.cy0),
+            "angle": float(spec.angle),
+            "angular_velocity": float(spec.angular_velocity),
             "free_x": bool(spec.free_x),
             "free_y": bool(spec.free_y),
+            "free_theta": bool(spec.free_theta),
+            "shape": spec.shape,
             "mass": float(spec.mass),
             "damping": float(spec.damping),
             "stiffness": float(spec.stiffness),
+            "inertia": float(spec.inertia),
+            "angular_damping": float(spec.angular_damping),
+            "angular_stiffness": float(spec.angular_stiffness),
             "force_relaxation": float(spec.force_relaxation),
+            "moment_relaxation": float(spec.moment_relaxation),
+            "release_time_x": float(spec.release_time_x),
+            "release_time_y": float(spec.release_time_y),
             "max_displacement": float(spec.max_displacement),
             "max_speed": float(spec.max_speed),
+            "max_angle": float(spec.max_angle),
+            "max_angular_speed": float(spec.max_angular_speed),
             "last_force_x": float(spec.last_force_x),
             "last_force_y": float(spec.last_force_y),
+            "last_moment_z": float(spec.last_moment_z),
         }
 
     # ------------------------------------------------------------------
@@ -870,9 +1361,19 @@ class ImmersedBoundary:
             enforce_u_mask = self.mask_u.copy()
             enforce_v_mask = self.mask_v.copy()
             for spec in [*self.translating_circles, *self.free_y_circles]:
-                u_body_t, v_body_t = spec.velocity(time)
-                u_target[spec.mask_u] = u_body_t
-                v_target[spec.mask_v] = v_body_t
+                if isinstance(spec, FreeYCircleSpec):
+                    u_target[spec.mask_u] = spec.u_velocity_at(
+                        self._u_y,
+                        time=time,
+                    )[spec.mask_u]
+                    v_target[spec.mask_v] = spec.v_velocity_at(
+                        self._v_x,
+                        time=time,
+                    )[spec.mask_v]
+                else:
+                    u_body_t, v_body_t = spec.velocity(time)
+                    u_target[spec.mask_u] = u_body_t
+                    v_target[spec.mask_v] = v_body_t
                 enforce_u_mask |= spec.mask_u
                 enforce_v_mask |= spec.mask_v
 

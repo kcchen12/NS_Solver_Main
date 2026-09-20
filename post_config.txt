@@ -13,6 +13,7 @@ draw_cylinder_overlay = false
 auto_generate_coeff_history = true
 auto_generate_aero_report = true
 auto_generate_shedding_spectrum = true
+auto_generate_y_oscillation_strouhal = true
 auto_generate_drag_decomposition = true
 auto_generate_drag_decomposition_plot = true
 auto_generate_pressure_coefficient_theta = true

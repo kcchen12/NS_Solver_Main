@@ -19,6 +19,7 @@ from analyze_aerodynamics import (
     _resolve_force_source,
     plot_drag_decomposition,
     plot_shedding_spectrum,
+    plot_y_oscillation_strouhal,
     run_analysis,
     save_pressure_coefficient_report,
 )
@@ -77,6 +78,54 @@ class TestAnalyzeAerodynamicsHelpers:
             )
 
             assert (results_dir / "test_shedding_spectrum.png").exists()
+        finally:
+            os.chdir(old_cwd)
+
+    def test_plot_y_oscillation_strouhal_writes_png(self, tmp_path):
+        results_dir = tmp_path / "results"
+        results_dir.mkdir()
+        outdir = tmp_path / "output"
+        outdir.mkdir()
+        old_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            t = np.linspace(0.0, 20.0, 400, endpoint=False)
+            lift_freq = 0.4
+            y_freq = 0.4
+            c_l = np.sin(2.0 * np.pi * lift_freq * t)
+            c_d = np.zeros_like(c_l)
+            csv_path = tmp_path / "aero.csv"
+            np.savetxt(
+                csv_path,
+                np.column_stack((t, c_d, c_l)),
+                delimiter=",",
+                header="t,c_d,c_l",
+                comments="",
+            )
+
+            for time in t[::4]:
+                y_disp = 0.1 * np.sin(2.0 * np.pi * y_freq * time)
+                np.savez(
+                    outdir / f"snap_{time:.6f}.npz",
+                    t=np.array(time),
+                    p=np.zeros((2, 2)),
+                    meta_cylinder_free_y_displacement=np.array(y_disp),
+                    meta_cylinder_center_y=np.array(y_disp),
+                )
+
+            plot_y_oscillation_strouhal(
+                str(csv_path),
+                indir=str(outdir),
+                save_name="test_y_oscillation_strouhal.png",
+                t_min=0.0,
+                f_min=0.1,
+                f_max=1.5,
+                char_length=1.0,
+                u_ref=1.0,
+                results_dir=str(results_dir),
+            )
+
+            assert (results_dir / "test_y_oscillation_strouhal.png").exists()
         finally:
             os.chdir(old_cwd)
 
@@ -369,6 +418,7 @@ class TestAnalyzeAerodynamicsHelpers:
             )
 
         decomp_path = results_dir / "drag_decomposition.csv"
+        report_path = results_dir / "aero_report.txt"
         status = run_analysis(
             indir=str(outdir),
             config=str(config_path),
@@ -377,7 +427,7 @@ class TestAnalyzeAerodynamicsHelpers:
             t_min=0.0,
             save_series=None,
             save_drag_decomposition=str(decomp_path),
-            save_report=None,
+            save_report=str(report_path),
             force_source="surface-full",
             drop_final_sample=False,
         )
@@ -393,6 +443,10 @@ class TestAnalyzeAerodynamicsHelpers:
             data["pressure_c_d"] + data["viscous_c_d"],
             data["total_c_d"],
         )
+        report = report_path.read_text(encoding="utf-8")
+        assert "Drag ratio" in report
+        assert "C_d,p/C_d,v" in report
+        assert "pressure fraction" in report
 
     def test_plot_drag_decomposition_writes_png(self, tmp_path):
         results_dir = tmp_path / "results"

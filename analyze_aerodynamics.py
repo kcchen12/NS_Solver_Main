@@ -974,6 +974,144 @@ def plot_shedding_spectrum(
     print(f"Saved figure: {save_path}")
 
 
+def _load_body_y_motion_series(
+    indir: str = "output",
+    pattern: str = "snap_*.npz",
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Load body y-motion history from snapshot metadata."""
+    snapshots = _collect_snapshots(indir, pattern)
+    if not snapshots:
+        raise ValueError(f"No snapshots found in {indir!r} with pattern {pattern!r}.")
+
+    times: list[float] = []
+    y_values: list[float] = []
+    for t, path in snapshots:
+        with np.load(path, allow_pickle=False) as data:
+            y_value = _safe_scalar(data, "meta_cylinder_free_y_displacement")
+            if y_value is None:
+                y_value = _safe_scalar(data, "meta_cylinder_center_y")
+            if y_value is None:
+                continue
+        times.append(float(t))
+        y_values.append(float(y_value))
+
+    if len(times) < 8:
+        raise ValueError(
+            "Not enough body y-motion metadata samples to compute a spectrum."
+        )
+
+    return np.asarray(times, dtype=float), np.asarray(y_values, dtype=float)
+
+
+def plot_y_oscillation_strouhal(
+    csv_path: str,
+    indir: str = "output",
+    pattern: str = "snap_*.npz",
+    save_name: str = "y_oscillation_strouhal.png",
+    t_min: float = 1.0,
+    f_min: float = 0.05,
+    f_max: float = 2.0,
+    char_length: float = 1.0,
+    u_ref: float = 1.0,
+    results_dir: str = DEFAULT_RESULTS_DIR,
+) -> str:
+    """Plot body y-oscillation frequency against lift-based Strouhal number."""
+    plt.switch_backend("Agg")
+    if u_ref <= 0.0:
+        raise ValueError("u_ref must be positive")
+    if char_length <= 0.0:
+        raise ValueError("char_length must be positive")
+
+    arr = np.genfromtxt(csv_path, delimiter=",", names=True)
+    if arr.size == 0:
+        raise ValueError(f"No rows found in coefficient file: {csv_path}")
+    names = arr.dtype.names or ()
+    if "t" not in names or "c_l" not in names:
+        raise ValueError(
+            f"CSV missing required columns ['t', 'c_l']. Found: {list(names)}"
+        )
+
+    t_lift = np.atleast_1d(arr["t"]).astype(float)
+    c_l = np.atleast_1d(arr["c_l"]).astype(float)
+    lift_peak = _dominant_frequency(
+        t_lift,
+        c_l,
+        t_min=t_min,
+        f_min=f_min,
+        f_max=f_max,
+    )
+    if lift_peak is None:
+        raise ValueError("Could not resolve a dominant lift/Strouhal frequency.")
+
+    t_body, y_body = _load_body_y_motion_series(indir=indir, pattern=pattern)
+    y_peak = _dominant_frequency(
+        t_body,
+        y_body,
+        t_min=t_min,
+        f_min=f_min,
+        f_max=f_max,
+    )
+    if y_peak is None:
+        raise ValueError("Could not resolve a dominant body y-oscillation frequency.")
+
+    lift_freq = float(lift_peak[0])
+    y_freq = float(y_peak[0])
+    lift_st = lift_freq * float(char_length) / float(u_ref)
+    y_st = y_freq * float(char_length) / float(u_ref)
+    expected_y_freq = lift_st * float(u_ref) / float(char_length)
+
+    fig, ax = plt.subplots(figsize=(8, 5.5))
+    st_min = max(0.0, 0.8 * min(lift_st, y_st))
+    st_max = max(1.2 * max(lift_st, y_st), lift_st + 1.0e-6)
+    st_line = np.linspace(st_min, st_max, 100)
+    ax.plot(
+        st_line,
+        st_line * float(u_ref) / float(char_length),
+        color="0.45",
+        linestyle="--",
+        linewidth=1.3,
+        label="f = St U / L",
+    )
+    ax.scatter(
+        [lift_st],
+        [y_freq],
+        color="tab:blue",
+        s=70,
+        zorder=4,
+        label="body y oscillation",
+    )
+    ax.scatter(
+        [lift_st],
+        [expected_y_freq],
+        color="crimson",
+        marker="x",
+        s=80,
+        zorder=5,
+        label="lift shedding reference",
+    )
+    ax.annotate(
+        f"f_y={y_freq:.4g}\nSt_y={y_st:.4g}\nSt_lift={lift_st:.4g}",
+        xy=(lift_st, y_freq),
+        xytext=(10, 12),
+        textcoords="offset points",
+        fontsize=9,
+        arrowprops={"arrowstyle": "-", "color": "tab:blue", "lw": 0.8},
+    )
+    ax.set_xlabel("Lift Strouhal number, St = f_lift L / U")
+    ax.set_ylabel("Body y-oscillation frequency")
+    ax.set_title("Body Y-Oscillation Frequency vs. Strouhal Number")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="best")
+    fig.tight_layout()
+
+    os.makedirs(results_dir, exist_ok=True)
+    save_path = os.path.join(results_dir, save_name)
+    fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved figure: {save_path}")
+    return save_path
+
+
 def plot_drag_decomposition(
     csv_path: str,
     save_name: str = "drag_decomposition.png",
@@ -1618,6 +1756,19 @@ def run_analysis(
             "viscous_c_d_min": float(np.min(viscous_cd)),
             "viscous_c_d_max": float(np.max(viscous_cd)),
         }
+        viscous_mean = drag_decomposition_stats["viscous_c_d_mean"]
+        pressure_mean = drag_decomposition_stats["pressure_c_d_mean"]
+        total_mean = drag_decomposition_stats["total_c_d_mean"]
+        drag_decomposition_stats["pressure_to_viscous_c_d_ratio"] = (
+            pressure_mean / viscous_mean
+            if abs(viscous_mean) > np.finfo(float).eps
+            else np.nan
+        )
+        drag_decomposition_stats["pressure_c_d_fraction"] = (
+            pressure_mean / total_mean
+            if abs(total_mean) > np.finfo(float).eps
+            else np.nan
+        )
         print(f"Saved drag decomposition: {save_drag_decomposition}")
 
     dt = np.diff(t)
@@ -1717,6 +1868,13 @@ def run_analysis(
             f"C_d,v={drag_decomposition_stats['viscous_c_d_mean']:.6g}, "
             f"C_d,total={drag_decomposition_stats['total_c_d_mean']:.6g}"
         )
+        print(
+            "Drag ratio        : "
+            f"C_d,p/C_d,v="
+            f"{drag_decomposition_stats['pressure_to_viscous_c_d_ratio']:.6g}, "
+            f"pressure fraction="
+            f"{drag_decomposition_stats['pressure_c_d_fraction']:.6g}"
+        )
     print(f"Char. length (L)  : {l_char:.6g}")
     print(f"Ref. velocity (U) : {u_ref:.6g}")
     print()
@@ -1813,6 +1971,11 @@ def run_analysis(
                     f"{drag_decomposition_stats['pressure_c_d_max']:.6g}], "
                     f"C_d,v=[{drag_decomposition_stats['viscous_c_d_min']:.6g}, "
                     f"{drag_decomposition_stats['viscous_c_d_max']:.6g}]",
+                    "Drag ratio        : "
+                    f"C_d,p/C_d,v="
+                    f"{drag_decomposition_stats['pressure_to_viscous_c_d_ratio']:.6g}, "
+                    f"pressure fraction="
+                    f"{drag_decomposition_stats['pressure_c_d_fraction']:.6g}",
                 ]
                 if drag_decomposition_stats is not None
                 else []

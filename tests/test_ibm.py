@@ -210,10 +210,61 @@ class TestIBMCircle:
         )
         spec = self.ibm.free_y_circles[0]
 
-        spec.advance(force_x=0.0, force_y=1.0e6, dt=1.0)
+        spec.advance(force_x=0.0, force_y=1.0e6, moment_z=0.0, dt=1.0)
 
-        assert spec.velocity_y == pytest.approx(0.1)
+        assert spec.velocity_y == pytest.approx(0.0)
         assert spec.y == pytest.approx(cy + 0.05)
+
+    def test_free_x_circle_zeroes_outward_velocity_at_displacement_limit(self):
+        cx, cy, r = 1.0, 0.75, 0.2
+        self.ibm.add_free_y_circle(
+            cx,
+            cy,
+            r,
+            mass=1.0,
+            damping=0.0,
+            stiffness=0.0,
+            initial_velocity_x=0.0,
+            force_relaxation=1.0,
+            max_displacement=0.05,
+            max_speed=0.1,
+            free_x=True,
+            free_y=False,
+        )
+        spec = self.ibm.free_y_circles[0]
+
+        spec.advance(force_x=1.0e6, force_y=0.0, moment_z=0.0, dt=1.0)
+
+        assert spec.velocity_x == pytest.approx(0.0)
+        assert spec.x == pytest.approx(cx + 0.05)
+
+    def test_free_x_circle_release_time_delays_motion_and_wall_velocity(self):
+        cx, cy, r = 1.0, 0.75, 0.2
+        self.ibm.add_free_y_circle(
+            cx,
+            cy,
+            r,
+            mass=1.0,
+            damping=0.0,
+            stiffness=0.0,
+            initial_velocity_x=0.2,
+            force_relaxation=1.0,
+            max_displacement=1.0,
+            max_speed=1.0,
+            free_x=True,
+            free_y=False,
+            release_time_x=2.0,
+        )
+        spec = self.ibm.free_y_circles[0]
+
+        assert np.allclose(spec.u_velocity_at(self.g.yc, time=1.0), 0.0)
+        spec.advance(force_x=0.0, force_y=0.0, moment_z=0.0, dt=1.0, time=1.0)
+        assert spec.x == pytest.approx(cx)
+        assert spec.velocity_x == pytest.approx(0.0)
+
+        spec.advance(force_x=0.0, force_y=0.0, moment_z=0.0, dt=1.0, time=2.0)
+        assert spec.velocity_x == pytest.approx(0.2)
+        assert spec.x == pytest.approx(cx + 0.2)
 
     def test_free_x_circle_advances_from_drag_force(self):
         cx, cy, r = 1.0, 0.75, 0.2
@@ -243,6 +294,91 @@ class TestIBMCircle:
         assert state["last_force_x"] == pytest.approx(force_x)
         assert state["velocity_x"] == pytest.approx(0.5 * force_x / 2.0)
         assert state["center_x"] > cx
+
+    def test_free_theta_circle_advances_from_moment(self):
+        cx, cy, r = 1.0, 0.75, 0.2
+        self.ibm.add_free_y_circle(
+            cx,
+            cy,
+            r,
+            mass=2.0,
+            damping=0.0,
+            stiffness=0.0,
+            force_relaxation=1.0,
+            max_displacement=1.0,
+            max_speed=10.0,
+            free_x=False,
+            free_y=False,
+            free_theta=True,
+            inertia=2.0,
+            angular_damping=0.0,
+            angular_stiffness=0.0,
+            moment_relaxation=1.0,
+            max_angle=10.0,
+            max_angular_speed=10.0,
+        )
+        spec = self.ibm.free_y_circles[0]
+        spec.record_moment(raw_moment_z=4.0)
+
+        self.ibm.advance_free_y_circles(dt=0.5)
+        state = self.ibm.first_free_y_circle_state()
+
+        assert state is not None
+        assert state["center_x"] == pytest.approx(cx)
+        assert state["center_y"] == pytest.approx(cy)
+        assert state["last_moment_z"] == pytest.approx(4.0)
+        assert state["angular_velocity"] == pytest.approx(1.0)
+        assert state["angle"] == pytest.approx(0.5)
+
+    def test_free_theta_circle_zeroes_outward_velocity_at_angle_limit(self):
+        cx, cy, r = 1.0, 0.75, 0.2
+        self.ibm.add_free_y_circle(
+            cx,
+            cy,
+            r,
+            mass=1.0,
+            damping=0.0,
+            stiffness=0.0,
+            force_relaxation=1.0,
+            free_x=False,
+            free_y=False,
+            free_theta=True,
+            inertia=1.0,
+            angular_damping=0.0,
+            angular_stiffness=0.0,
+            moment_relaxation=1.0,
+            max_angle=0.05,
+            max_angular_speed=0.1,
+        )
+        spec = self.ibm.free_y_circles[0]
+        spec.record_moment(raw_moment_z=1.0e6)
+
+        self.ibm.advance_free_y_circles(dt=1.0)
+
+        assert spec.angular_velocity == pytest.approx(0.0)
+        assert spec.angle == pytest.approx(0.05)
+
+    def test_free_theta_circle_imposes_rotational_wall_velocity(self):
+        cx, cy, r = 1.0, 0.75, 0.2
+        omega = 2.0
+        self.ibm.add_free_y_circle(
+            cx,
+            cy,
+            r,
+            free_x=False,
+            free_y=False,
+            free_theta=True,
+            initial_angular_velocity=omega,
+        )
+        u = np.zeros(self.g.u_shape)
+        v = np.zeros(self.g.v_shape)
+
+        self.ibm.apply(u, v, dt=0.1, rho=1.0, time=0.0)
+
+        i_u, j_u = np.argwhere(self.ibm.free_y_circles[0].mask_u)[0]
+        i_v, j_v = np.argwhere(self.ibm.free_y_circles[0].mask_v)[0]
+        assert np.isclose(u[i_u, j_u], -omega * (self.g.yc[j_u] - cy))
+        assert np.isclose(v[i_v, j_v], omega * (self.g.xc[i_v] - cx))
 
     def test_force_diagnostic_uses_local_face_measures_on_nonuniform_grid(self):
         xf = np.array([0.0, 0.2, 0.6, 1.0], dtype=float)
@@ -297,6 +433,36 @@ class TestIBMRectangle:
         with pytest.raises(ValueError):
             ibm.add_mask(np.zeros(g.u_shape, dtype=bool), np.zeros((1, 1), dtype=bool))
 
+    def test_free_square_advances_from_drag_force(self):
+        g = CartesianGrid(24, 24, lx=2.0, ly=2.0)
+        ibm = ImmersedBoundary(g)
+        cx, cy, r = 1.0, 1.0, 0.2
+        ibm.add_free_y_circle(
+            cx,
+            cy,
+            r,
+            shape="square",
+            free_x=True,
+            free_y=False,
+            mass=2.0,
+            damping=0.0,
+            stiffness=0.0,
+            force_relaxation=1.0,
+            max_displacement=1.0,
+            max_speed=10.0,
+        )
+        u = np.ones(g.u_shape)
+        v = np.zeros(g.v_shape)
+
+        force_x, _ = ibm.apply(u, v, dt=1.0, rho=1.0, time=0.0)
+        ibm.advance_free_y_circles(dt=0.5)
+        state = ibm.first_free_y_circle_state()
+
+        assert state is not None
+        assert state["shape"] == "square"
+        assert state["last_force_x"] == pytest.approx(force_x)
+        assert state["center_x"] > cx
+
 
 class TestIBMAirfoil:
     def test_add_naca_00xx_airfoil_marks_solid(self):
@@ -325,6 +491,114 @@ class TestIBMAirfoil:
             ibm.add_naca_00xx_airfoil(0.5, 0.5, chord=0.0)
         with pytest.raises(ValueError):
             ibm.add_naca_00xx_airfoil(0.5, 0.5, chord=1.0, thickness_ratio=0.0)
+
+    def test_free_airfoil_rotates_mask_with_theta(self):
+        g = CartesianGrid(80, 80, lx=2.0, ly=2.0)
+        ibm = ImmersedBoundary(g)
+        ibm.add_free_y_circle(
+            1.0,
+            1.0,
+            0.25,
+            shape="airfoil",
+            chord=0.8,
+            thickness_ratio=0.18,
+            free_x=False,
+            free_y=False,
+            free_theta=True,
+            inertia=1.0,
+            angular_damping=0.0,
+            angular_stiffness=0.0,
+            moment_relaxation=1.0,
+            max_angle=np.pi,
+            max_angular_speed=10.0,
+        )
+        mask_u_before = ibm.free_y_circles[0].mask_u.copy()
+
+        ibm.free_y_circles[0].angle = np.pi / 2.0
+        ibm.apply(np.zeros(g.u_shape), np.zeros(g.v_shape), dt=0.1, rho=1.0)
+
+        assert ibm.free_y_circles[0].shape == "airfoil"
+        assert not np.array_equal(mask_u_before, ibm.free_y_circles[0].mask_u)
+
+
+class TestIBMPolygon:
+    def test_add_polygon_marks_solid(self):
+        g = CartesianGrid(80, 80, lx=2.0, ly=2.0)
+        ibm = ImmersedBoundary(g)
+        points = np.array(
+            [
+                [-0.30, -0.20],
+                [0.32, -0.14],
+                [0.24, 0.22],
+                [-0.18, 0.30],
+                [-0.36, 0.04],
+            ]
+        )
+
+        ibm.add_polygon(1.0, 1.0, points)
+
+        assert ibm.has_solid
+        i_c = int(np.argmin(np.abs(g.xf - 1.0)))
+        j_c = int(np.argmin(np.abs(g.yc - 1.0)))
+        assert ibm.mask_u[i_c, j_c]
+
+    def test_free_polygon_advances_and_rotates_mask(self):
+        g = CartesianGrid(80, 80, lx=2.0, ly=2.0)
+        ibm = ImmersedBoundary(g)
+        points = np.array(
+            [
+                [-0.30, -0.20],
+                [0.32, -0.14],
+                [0.24, 0.22],
+                [-0.18, 0.30],
+                [-0.36, 0.04],
+            ]
+        )
+        cx, cy = 1.0, 1.0
+        ibm.add_free_y_circle(
+            cx,
+            cy,
+            0.3,
+            shape="polygon",
+            polygon_points=points,
+            free_x=True,
+            free_y=False,
+            free_theta=True,
+            mass=2.0,
+            damping=0.0,
+            stiffness=0.0,
+            inertia=1.0,
+            angular_damping=0.0,
+            angular_stiffness=0.0,
+            force_relaxation=1.0,
+            moment_relaxation=1.0,
+            max_displacement=1.0,
+            max_speed=10.0,
+            max_angle=np.pi,
+            max_angular_speed=10.0,
+        )
+        mask_before = ibm.free_y_circles[0].mask_u.copy()
+        u = np.ones(g.u_shape)
+        v = np.zeros(g.v_shape)
+
+        force_x, _ = ibm.apply(u, v, dt=1.0, rho=1.0, time=0.0)
+        ibm.free_y_circles[0].record_moment(2.0)
+        ibm.advance_free_y_circles(dt=0.5)
+        state = ibm.first_free_y_circle_state()
+
+        assert state is not None
+        assert state["shape"] == "polygon"
+        assert state["last_force_x"] == pytest.approx(force_x)
+        assert state["center_x"] > cx
+        assert state["angle"] > 0.0
+        assert not np.array_equal(mask_before, ibm.free_y_circles[0].mask_u)
+
+    def test_invalid_polygon_rejected(self):
+        g = CartesianGrid(20, 20, lx=1.0, ly=1.0)
+        ibm = ImmersedBoundary(g)
+
+        with pytest.raises(ValueError):
+            ibm.add_polygon(0.5, 0.5, np.array([[0.0, 0.0], [0.1, 0.0]]))
 
 
 class TestIBMIndentedCircle:
@@ -358,5 +632,28 @@ class TestIBMIndentedCircle:
                 indent_width=0.7,
                 indent_depth=0.1,
             )
+
+    def test_free_top_indent_rotates_notch_with_theta(self):
+        g = CartesianGrid(80, 80, lx=2.0, ly=2.0)
+        ibm = ImmersedBoundary(g)
+        ibm.add_free_y_circle(
+            1.0,
+            1.0,
+            0.5,
+            shape="circle-with-top-indent",
+            indent_width=0.3,
+            indent_depth=0.2,
+            free_x=False,
+            free_y=False,
+            free_theta=True,
+            max_angle=np.pi,
+        )
+        mask_u_before = ibm.free_y_circles[0].mask_u.copy()
+
+        ibm.free_y_circles[0].angle = np.pi / 2.0
+        ibm.apply(np.zeros(g.u_shape), np.zeros(g.v_shape), dt=0.1, rho=1.0)
+
+        assert ibm.free_y_circles[0].shape == "circle-with-top-indent"
+        assert not np.array_equal(mask_u_before, ibm.free_y_circles[0].mask_u)
 
 

@@ -10,7 +10,7 @@ enable_experimental_config = true
 truncate_y_cells = 0
 
 # Cylinder experiment controls
-# If true, request spring-mass-damper cylinder degrees of freedom.
+# If true, request spring-mass-damper bluff-body degrees of freedom.
 # free-x allows streamwise motion; free-y allows transverse motion.
 cylinder_free_x_dof = true
 cylinder_free_x_mass = 100.0
@@ -18,8 +18,11 @@ cylinder_free_x_damping = 5.0
 cylinder_free_x_stiffness = 20.0
 cylinder_free_x_initial_velocity = 0.0
 cylinder_free_x_force_relaxation = 0.05
+# Use a positive percent of body diameter, or "off" to disable this clamp.
 cylinder_free_x_max_displacement_percent = 25.0
 cylinder_free_x_max_speed = 0.25
+# Hold x fixed until this simulation time; 0 releases immediately.
+cylinder_free_x_release_time = 0.0
 
 cylinder_free_y_dof = true
 cylinder_free_y_mass = 100.0
@@ -27,14 +30,29 @@ cylinder_free_y_damping = 5.0
 cylinder_free_y_stiffness = 20.0
 cylinder_free_y_initial_velocity = 0.0
 cylinder_free_y_force_relaxation = 0.05
+# Use a positive percent of body diameter, or "off" to disable this clamp.
 cylinder_free_y_max_displacement_percent = 25.0
 cylinder_free_y_max_speed = 0.25
+# Hold y fixed until this simulation time; 0 releases immediately.
+cylinder_free_y_release_time = 0.0
+
+# Free angular DoF driven by the IBM moment about the body center.
+cylinder_free_theta_dof = false
+cylinder_free_theta_inertia = 10.0
+cylinder_free_theta_damping = 1.0
+cylinder_free_theta_stiffness = 5.0
+cylinder_free_theta_initial_angle_deg = 0.0
+cylinder_free_theta_initial_angular_velocity = 0.0
+cylinder_free_theta_moment_relaxation = 0.05
+cylinder_free_theta_max_angle_deg = 45.0
+cylinder_free_theta_max_angular_speed = 1.0
 
 # cylinder_experiment options:
 #   circle
 #   top-indent
 #   square
 #   airfoil
+#   polygon
 cylinder_experiment = circle
 
 # Top-indent cylinder controls
@@ -46,3 +64,9 @@ cylinder_indent_depth = 0.0
 airfoil_chord = -1.0
 airfoil_thickness_percent = 12.0
 airfoil_angle_deg = 0.0
+
+# Arbitrary polygon controls
+# Points are body-local coordinates relative to the configured body center.
+# Example below is a mildly irregular bluff body.
+polygon_points = -0.30,-0.20; 0.32,-0.14; 0.24,0.22; -0.18,0.30; -0.36,0.04
+polygon_angle_deg = 0.0

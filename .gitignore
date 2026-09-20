@@ -3,6 +3,8 @@
 .pytest_cache/
 output/
 results/
+**/output/
+**/results/
 **/__pycache__/
 *.pyc
 NS_Solver/
