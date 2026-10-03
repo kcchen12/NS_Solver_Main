@@ -1,0 +1,65 @@
+# Stationary cylinder production run from the shared t=100 spin-up state.
+
+nx = 640
+ny = 1280
+
+lx = 40.0
+ly = 40.0
+x_min = -10.0
+x_max = 30.0
+y_min = -20.0
+y_max = 20.0
+
+re = 100.0
+re_is_cylinder_based = true
+
+bc_left = inflow
+bc_right = outflow
+bc_bottom = farfield
+bc_top = farfield
+
+inflow_u = 1.0
+inflow_v = 0.0
+initial_v_perturbation_percent = 0.0
+inflow_w = 0.0
+farfield_mode = neumann
+
+wall_slip_mode = no-slip
+wall_penetration = false
+wall_normal_velocity = 0.0
+
+outflow_mode = convective
+outflow_speed = 1.0
+
+t_end = 225.0
+cfl = 0.25
+save_dt = 0.1
+outdir = cases/re100_640x1280/output/01_stationary_from_t100_t225
+resume_from = cases/re100_640x1280/output/00_stationary_spinup_t0_t100/snap_100.9001.npz
+resume_latest = false
+
+uniform_grid = false
+grid_beta_x = 2.0
+grid_beta_y = 2.0
+grid_uniform_x_start = -2.0
+grid_uniform_x_end = 12.0
+grid_uniform_y_start = -4.0
+grid_uniform_y_end = 4.0
+
+cylinder = true
+verbose = true
+cylinder_center_x = 0.0
+cylinder_center_y = 0.0
+cylinder_radius = 0.5
+
+cylinder_rotation_mode = stationary
+cylinder_rotation_amplitude = 0.0
+cylinder_rotation_frequency = 0.0
+cylinder_rotation_phase_deg = 0.0
+
+cylinder_translation_mode = stationary
+cylinder_translation_amplitude_percent = 10.0
+cylinder_translation_x_percent = 0.0
+cylinder_translation_y_percent = 0.0
+cylinder_translation_frequency = 0.0
+cylinder_translation_phase_deg = 0.0

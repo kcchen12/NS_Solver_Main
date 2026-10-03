@@ -1022,8 +1022,10 @@ class ImmersedBoundary:
             max_displacement = 0.5 * float(radius)
         if max_displacement <= 0.0:
             raise ValueError("max_displacement must be positive")
+        if not np.isfinite(max_speed) and not np.isinf(max_speed):
+            raise ValueError("max_speed must be finite or inf")
         if max_speed <= 0.0:
-            raise ValueError("max_speed must be positive")
+            raise ValueError("max_speed must be positive or inf")
         if release_time_x < 0.0:
             raise ValueError("release_time_x must be non-negative")
         if release_time_y < 0.0:
@@ -1248,6 +1250,57 @@ class ImmersedBoundary:
             )
         self._refresh_moving_circles(0.0)
 
+    def restore_first_free_y_circle_state(
+        self,
+        metadata: dict,
+        time: float = 0.0,
+    ) -> bool:
+        """Restore the first free-body cylinder state from snapshot metadata."""
+        if not self.free_y_circles:
+            return False
+        spec = self.free_y_circles[0]
+
+        def _optional_float(key: str) -> float | None:
+            if key not in metadata:
+                return None
+            value = float(metadata[key])
+            if not np.isfinite(value):
+                raise FloatingPointError(f"snapshot metadata {key!r} is not finite")
+            return value
+
+        center_x = _optional_float("cylinder_center_x")
+        center_y = _optional_float("cylinder_center_y")
+        displacement_x = _optional_float("cylinder_free_x_displacement")
+        displacement_y = _optional_float("cylinder_free_y_displacement")
+
+        if center_x is not None:
+            spec.x = center_x
+        elif displacement_x is not None:
+            spec.x = float(spec.cx0 + displacement_x)
+
+        if center_y is not None:
+            spec.y = center_y
+        elif displacement_y is not None:
+            spec.y = float(spec.cy0 + displacement_y)
+
+        for metadata_key, attr_name in (
+            ("cylinder_free_x_velocity", "velocity_x"),
+            ("cylinder_free_y_velocity", "velocity_y"),
+            ("cylinder_free_theta_angle", "angle"),
+            ("cylinder_free_theta_angular_velocity", "angular_velocity"),
+            ("ibm_force_x", "last_force_x"),
+            ("ibm_force_y", "last_force_y"),
+            ("ibm_moment_z", "last_moment_z"),
+        ):
+            value = _optional_float(metadata_key)
+            if value is not None:
+                setattr(spec, attr_name, value)
+
+        spec.released_x = bool(spec.released_x or float(time) >= spec.release_time_x)
+        spec.released_y = bool(spec.released_y or float(time) >= spec.release_time_y)
+        self._refresh_moving_circles(time)
+        return True
+
     def first_free_y_circle_state(self, time: float = 0.0) -> dict | None:
         if not self.free_y_circles:
             return None
@@ -1356,32 +1409,62 @@ class ImmersedBoundary:
 
         u_target = np.full_like(u, float(u_body))
         v_target = np.full_like(v, float(v_body))
+        u_weight = self._base_mask_u.astype(float)
+        v_weight = self._base_mask_v.astype(float)
 
         if self.translating_circles or self.free_y_circles:
-            enforce_u_mask = self.mask_u.copy()
-            enforce_v_mask = self.mask_v.copy()
+            enforce_u_mask = self._base_mask_u.copy()
+            enforce_v_mask = self._base_mask_v.copy()
             for spec in [*self.translating_circles, *self.free_y_circles]:
                 if isinstance(spec, FreeYCircleSpec):
-                    u_target[spec.mask_u] = spec.u_velocity_at(
-                        self._u_y,
-                        time=time,
-                    )[spec.mask_u]
-                    v_target[spec.mask_v] = spec.v_velocity_at(
-                        self._v_x,
-                        time=time,
-                    )[spec.mask_v]
+                    weight_u, weight_v = self._free_body_force_weights(spec)
+                    u_body_field = spec.u_velocity_at(self._u_y, time=time)
+                    v_body_field = spec.v_velocity_at(self._v_x, time=time)
+                    moving_u = weight_u > 0.0
+                    moving_v = weight_v > 0.0
+                    u_target[moving_u] = u_body_field[moving_u]
+                    v_target[moving_v] = v_body_field[moving_v]
+                    u_weight = np.maximum(u_weight, weight_u)
+                    v_weight = np.maximum(v_weight, weight_v)
+                    enforce_u_mask |= moving_u
+                    enforce_v_mask |= moving_v
                 else:
+                    cx, cy = spec.center(time)
+                    weight_u = self._circle_force_weight(
+                        self._u_x,
+                        self._u_y,
+                        cx,
+                        cy,
+                        spec.radius,
+                        self._force_regularization_width,
+                    )
+                    weight_v = self._circle_force_weight(
+                        self._v_x,
+                        self._v_y,
+                        cx,
+                        cy,
+                        spec.radius,
+                        self._force_regularization_width,
+                    )
                     u_body_t, v_body_t = spec.velocity(time)
-                    u_target[spec.mask_u] = u_body_t
-                    v_target[spec.mask_v] = v_body_t
-                enforce_u_mask |= spec.mask_u
-                enforce_v_mask |= spec.mask_v
+                    moving_u = weight_u > 0.0
+                    moving_v = weight_v > 0.0
+                    u_target[moving_u] = u_body_t
+                    v_target[moving_v] = v_body_t
+                    u_weight = np.maximum(u_weight, weight_u)
+                    v_weight = np.maximum(v_weight, weight_v)
+                    enforce_u_mask |= moving_u
+                    enforce_v_mask |= moving_v
 
         if self.rotating_circles:
             for spec in self.rotating_circles:
                 omega = spec.angular_velocity(time)
                 u_target[spec.mask_u] = -omega * spec.u_y_offset
                 v_target[spec.mask_v] = omega * spec.v_x_offset
+                u_weight[spec.mask_u] = 1.0
+                v_weight[spec.mask_v] = 1.0
+                enforce_u_mask |= spec.mask_u
+                enforce_v_mask |= spec.mask_v
 
         if dt is not None and dt > 0.0:
             if self.translating_circles or self.free_y_circles:
@@ -1417,15 +1500,27 @@ class ImmersedBoundary:
                 forcing_u = np.zeros_like(u)
                 forcing_v = np.zeros_like(v)
                 forcing_u[enforce_u_mask] = (
-                    u_target[enforce_u_mask] - u[enforce_u_mask]) / dt
+                    u_weight[enforce_u_mask]
+                    * (u_target[enforce_u_mask] - u[enforce_u_mask])
+                    / dt
+                )
                 forcing_v[enforce_v_mask] = (
-                    v_target[enforce_v_mask] - v[enforce_v_mask]) / dt
+                    v_weight[enforce_v_mask]
+                    * (v_target[enforce_v_mask] - v[enforce_v_mask])
+                    / dt
+                )
         elif return_face_forcing:
             forcing_u = np.zeros_like(u)
             forcing_v = np.zeros_like(v)
 
-        u[enforce_u_mask] = u_target[enforce_u_mask]
-        v[enforce_v_mask] = v_target[enforce_v_mask]
+        u[enforce_u_mask] += (
+            u_weight[enforce_u_mask]
+            * (u_target[enforce_u_mask] - u[enforce_u_mask])
+        )
+        v[enforce_v_mask] += (
+            v_weight[enforce_v_mask]
+            * (v_target[enforce_v_mask] - v[enforce_v_mask])
+        )
         if return_face_forcing:
             return force_x, force_y, forcing_u, forcing_v
         return force_x, force_y

@@ -12,6 +12,7 @@ from main import (
     _airfoil_outline_points,
     _normalize_cylinder_experiment_mode,
     _normalize_cylinder_geometry_mode,
+    _plot_auto_coeff_history,
     _parse_polygon_points,
     _normalize_cylinder_translation_mode,
     parse_args,
@@ -47,6 +48,28 @@ def test_translation_mode_aliases():
     assert _normalize_cylinder_translation_mode("left-right") == "oscillatory-x"
     assert _normalize_cylinder_translation_mode("up_down") == "oscillatory-y"
     assert _normalize_cylinder_translation_mode("both") == "oscillatory-xy"
+
+
+def test_auto_coeff_history_uses_full_history_for_primary_plot(monkeypatch):
+    calls = []
+
+    def fake_plot_coeff_history(*args, **kwargs):
+        calls.append((args, kwargs))
+
+    monkeypatch.setattr("main.plot_coeff_history", fake_plot_coeff_history)
+
+    _plot_auto_coeff_history("results/aero.csv", settled_t_min=100.0)
+
+    assert calls == [
+        (
+            ("results/aero.csv",),
+            {
+                "save_name": "coeff_history.png",
+                "coeff_t_min": 0.0,
+                "settled_coeff_t_min": 100.0,
+            },
+        )
+    ]
 
 
 def test_square_bluff_body_aliases():
@@ -162,7 +185,7 @@ def test_y_truncation_preserves_nonuniform_reference_faces():
     assert np.all(np.diff(args._truncated_yf) > 0.0)
 
 
-def _write_minimal_configs(tmp_path, experiment_text: str):
+def _write_minimal_configs(tmp_path, experiment_text: str, post_text: str = ""):
     config_path = tmp_path / "config.txt"
     experiment_path = tmp_path / "experimental_config.txt"
     post_path = tmp_path / "post_config.txt"
@@ -183,8 +206,49 @@ def _write_minimal_configs(tmp_path, experiment_text: str):
         encoding="utf-8",
     )
     experiment_path.write_text(experiment_text, encoding="utf-8")
-    post_path.write_text("", encoding="utf-8")
+    post_path.write_text(post_text, encoding="utf-8")
     return config_path, experiment_path, post_path
+
+
+def test_post_config_reads_restart_interpolation_options(tmp_path, monkeypatch):
+    config_path, experiment_path, post_path = _write_minimal_configs(
+        tmp_path,
+        "enable_experimental_config = false",
+        "\n".join(
+            [
+                "auto_generate_restart_interpolation = true",
+                "restart_interpolation_method = cubic",
+                "restart_interpolation_nx = 48",
+                "restart_interpolation_ny = 96",
+                "restart_interpolation_outdir = restarts",
+                "restart_interpolation_filename = restart_cubic.npz",
+                "restart_interpolation_write_grid = false",
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "main.py",
+            "--config",
+            str(config_path),
+            "--experiment-config",
+            str(experiment_path),
+            "--post-config",
+            str(post_path),
+        ],
+    )
+
+    args = parse_args()
+
+    assert args.auto_generate_restart_interpolation
+    assert args.restart_interpolation_method == "cubic"
+    assert args.restart_interpolation_nx == 48
+    assert args.restart_interpolation_ny == 96
+    assert args.restart_interpolation_outdir == "restarts"
+    assert args.restart_interpolation_filename == "restart_cubic.npz"
+    assert not args.restart_interpolation_write_grid
 
 
 def test_disabled_experimental_config_ignores_experimental_values(tmp_path, monkeypatch):
@@ -363,8 +427,13 @@ def test_enabled_experimental_config_allows_free_displacement_clamp_off(
                 "enable_experimental_config = true",
                 "cylinder_free_x_dof = true",
                 "cylinder_free_x_max_displacement_percent = off",
+                "cylinder_free_x_max_speed = off",
                 "cylinder_free_y_dof = true",
                 "cylinder_free_y_max_displacement_percent = off",
+                "cylinder_free_y_max_speed = off",
+                "cylinder_free_theta_dof = true",
+                "cylinder_free_theta_max_angle_deg = off",
+                "cylinder_free_theta_max_angular_speed = off",
             ]
         ),
     )
@@ -386,6 +455,10 @@ def test_enabled_experimental_config_allows_free_displacement_clamp_off(
 
     assert np.isinf(args.cylinder_free_x_max_displacement_percent)
     assert np.isinf(args.cylinder_free_y_max_displacement_percent)
+    assert np.isinf(args.cylinder_free_x_max_speed)
+    assert np.isinf(args.cylinder_free_y_max_speed)
+    assert np.isinf(args.cylinder_free_theta_max_angle_deg)
+    assert np.isinf(args.cylinder_free_theta_max_angular_speed)
 
 
 def test_enabled_experimental_config_reads_square_body(tmp_path, monkeypatch):

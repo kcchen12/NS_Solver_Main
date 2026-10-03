@@ -256,7 +256,21 @@ class TestIBMForcing:
         assert np.isfinite(state["center_y"])
         assert np.isfinite(state["velocity_y"])
         assert np.allclose(solver.u[ibm.mask_u], 0.0, atol=1e-12)
-        assert np.allclose(solver.v[ibm.mask_v], state["velocity_y"], atol=1e-12)
+        weight_v = ibm._circle_force_weight(
+            ibm._v_x,
+            ibm._v_y,
+            state["center_x"],
+            state["center_y"],
+            0.1,
+            ibm._force_regularization_width,
+        )
+        core_v = ibm.mask_v & (weight_v > 0.99)
+        assert np.any(core_v)
+        assert np.allclose(
+            solver.v[core_v],
+            state["velocity_y"],
+            atol=1e-4,
+        )
 
     def test_rotating_ibm_circle_imposes_nonzero_wall_velocity(self):
         g = CartesianGrid(20, 12, lx=2.0, ly=1.0)

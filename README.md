@@ -130,6 +130,7 @@ Initialization and runtime:
 - `cylinder_free_x_mass`, `cylinder_free_y_mass`, `cylinder_free_x_damping`, `cylinder_free_y_damping`, `cylinder_free_x_stiffness`, `cylinder_free_y_stiffness`: spring-mass-damper parameters for the free body
 - `cylinder_free_x_initial_velocity`, `cylinder_free_y_initial_velocity`: initial streamwise/transverse cylinder velocity
 - `cylinder_free_x_max_displacement_percent`, `cylinder_free_y_max_displacement_percent`: displacement clamp as percent of body diameter; set to `off` to disable the clamp
+- `cylinder_free_x_max_speed`, `cylinder_free_y_max_speed`: speed clamp for free translation; set to `off` to disable the clamp
 - `cylinder_free_x_release_time`, `cylinder_free_y_release_time`: hold the corresponding free axis fixed until this simulation time; `0` releases immediately
 - `cylinder_free_theta_inertia`, `cylinder_free_theta_damping`, `cylinder_free_theta_stiffness`: torsional oscillator parameters for angular body motion
 - `cylinder_indent_width`, `cylinder_indent_depth`
@@ -147,6 +148,11 @@ Initialization and runtime:
 - `auto_generate_pressure_coefficient_theta`: automatically generate `results/pressure_coefficient_theta.csv` and `results/pressure_coefficient_theta.png`
 - `auto_generate_time_averaged_fields`: automatically generate `results/time_averaged_fields.npz`
 - `auto_generate_time_averaged_plots`: automatically generate `results/time_averaged_fields.png`
+- `auto_generate_restart_interpolation`: automatically interpolate the latest snapshot onto a finer restart grid
+- `restart_interpolation_method`: `linear` or `cubic`
+- `restart_interpolation_nx`, `restart_interpolation_ny`: target restart-grid cell counts; `0` defaults to twice the runtime resolution
+- `restart_interpolation_outdir`, `restart_interpolation_filename`: where to save the interpolated restart snapshot
+- `restart_interpolation_write_grid`: write matching prepared-grid metadata beside the restart snapshot
 - `auto_generate_ibm_forcing`: automatically generate `results/ibm_forcing.png` from the latest snapshot
 - `auto_generate_vorticity_video`: automatically generate `results/vorticity.gif` from all saved snapshots
 - `auto_vorticity_video_frame_stride`: use every `n`th snapshot when building the vorticity GIF

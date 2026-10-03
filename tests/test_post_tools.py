@@ -4,6 +4,11 @@ import os
 import numpy as np
 
 import view_snapshot_viewer
+from interpolate_restart import (
+    build_uniform_target_grid,
+    interpolate_restart_fields,
+    interpolate_restart_file,
+)
 from analyze_aerodynamics import (
     _compute_coefficients,
     _compute_forces,
@@ -25,6 +30,8 @@ from analyze_aerodynamics import (
 )
 from time_average_snapshots import compute_time_averaged_fields, save_time_averaged_fields
 from time_average_snapshots import plot_time_averaged_fields
+from src.grid import CartesianGrid
+from src.io_utils import load_snapshot, save_snapshot
 from view_snapshot_viewer import (
     _load_cylinder_overlay_geometry_for_snapshot,
     _compute_snapshot_vorticity,
@@ -534,6 +541,111 @@ class TestAnalyzeAerodynamicsHelpers:
             y_scale=0.75,
         )
         assert os.path.exists(plot_path)
+
+
+class TestInterpolateRestart:
+    def test_linear_interpolation_preserves_staggered_linear_fields(self):
+        coarse = CartesianGrid(nx=4, ny=3, lx=2.0, ly=1.5, x_min=-1.0, y_min=0.25)
+        fine = build_uniform_target_grid(nx=8, ny=6, source_grid=coarse)
+
+        xu, yu = np.meshgrid(coarse.xf, coarse.yc, indexing="ij")
+        xv, yv = np.meshgrid(coarse.xc, coarse.yf, indexing="ij")
+        xp, yp = np.meshgrid(coarse.xc, coarse.yc, indexing="ij")
+        u = 1.0 + 2.0 * xu - 0.5 * yu
+        v = -0.25 + 0.75 * xv + 1.5 * yv
+        p = 3.0 - xp + 0.25 * yp
+
+        result = interpolate_restart_fields(
+            u,
+            v,
+            p,
+            t=1.25,
+            meta={"nx": coarse.nx, "ny": coarse.ny, "lx": coarse.lx, "ly": coarse.ly},
+            source_grid=coarse,
+            target_grid=fine,
+            method="linear",
+        )
+
+        xu_f, yu_f = np.meshgrid(fine.xf, fine.yc, indexing="ij")
+        xv_f, yv_f = np.meshgrid(fine.xc, fine.yf, indexing="ij")
+        xp_f, yp_f = np.meshgrid(fine.xc, fine.yc, indexing="ij")
+        assert result.u.shape == fine.u_shape
+        assert result.v.shape == fine.v_shape
+        assert result.p.shape == fine.p_shape
+        assert np.allclose(result.u, 1.0 + 2.0 * xu_f - 0.5 * yu_f)
+        assert np.allclose(result.v, -0.25 + 0.75 * xv_f + 1.5 * yv_f)
+        assert np.allclose(result.p, 3.0 - xp_f + 0.25 * yp_f)
+        assert result.meta["nx"] == fine.nx
+        assert result.meta["ny"] == fine.ny
+        assert result.meta["restart_interpolation_method"] == "linear"
+
+    def test_cubic_file_interpolation_writes_restart_and_grid_metadata(self, tmp_path):
+        coarse = CartesianGrid(nx=5, ny=5, lx=1.0, ly=1.0)
+        fine = build_uniform_target_grid(nx=10, ny=10, source_grid=coarse)
+
+        def cubic_poly(x, y):
+            return 0.5 + x**3 - 2.0 * y**3 + 0.25 * x * y
+
+        xu, yu = np.meshgrid(coarse.xf, coarse.yc, indexing="ij")
+        xv, yv = np.meshgrid(coarse.xc, coarse.yf, indexing="ij")
+        xp, yp = np.meshgrid(coarse.xc, coarse.yc, indexing="ij")
+        snap_path = tmp_path / "snap_coarse.npz"
+        out_path = tmp_path / "restart" / "snap_fine.npz"
+        save_snapshot(
+            str(snap_path),
+            cubic_poly(xu, yu),
+            cubic_poly(xv, yv),
+            cubic_poly(xp, yp),
+            2.0,
+            meta=coarse.to_metadata(),
+        )
+
+        interpolate_restart_file(
+            str(snap_path),
+            str(out_path),
+            target_grid=fine,
+            method="cubic",
+            source_grid=coarse,
+            write_grid=True,
+        )
+
+        u_restart, v_restart, p_restart, t_restart, meta = load_snapshot(str(out_path))
+        xu_f, yu_f = np.meshgrid(fine.xf, fine.yc, indexing="ij")
+        xv_f, yv_f = np.meshgrid(fine.xc, fine.yf, indexing="ij")
+        xp_f, yp_f = np.meshgrid(fine.xc, fine.yc, indexing="ij")
+        assert np.isclose(t_restart, 2.0)
+        u_interior = (
+            (fine.yc >= coarse.yc[0]) & (fine.yc <= coarse.yc[-1])
+        )
+        v_interior = (
+            (fine.xc >= coarse.xc[0]) & (fine.xc <= coarse.xc[-1])
+        )
+        p_x_interior = (
+            (fine.xc >= coarse.xc[0]) & (fine.xc <= coarse.xc[-1])
+        )
+        p_y_interior = (
+            (fine.yc >= coarse.yc[0]) & (fine.yc <= coarse.yc[-1])
+        )
+        assert np.all(np.isfinite(u_restart))
+        assert np.all(np.isfinite(v_restart))
+        assert np.all(np.isfinite(p_restart))
+        assert np.allclose(
+            u_restart[:, u_interior],
+            cubic_poly(xu_f[:, u_interior], yu_f[:, u_interior]),
+        )
+        assert np.allclose(
+            v_restart[v_interior, :],
+            cubic_poly(xv_f[v_interior, :], yv_f[v_interior, :]),
+        )
+        assert np.allclose(
+            p_restart[np.ix_(p_x_interior, p_y_interior)],
+            cubic_poly(
+                xp_f[np.ix_(p_x_interior, p_y_interior)],
+                yp_f[np.ix_(p_x_interior, p_y_interior)],
+            ),
+        )
+        assert meta["restart_interpolation_method"] == "cubic"
+        assert (tmp_path / "restart" / "uniform_grid.npz").exists()
 
 
 class TestSnapshotViewerHelpers:

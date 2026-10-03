@@ -19,6 +19,7 @@ cylinder_free_x_initial_velocity = 0.0
 cylinder_free_x_force_relaxation = 0.05
 # Use a positive percent of body diameter, or "off" to disable this clamp.
 cylinder_free_x_max_displacement_percent = 25.0
+# Use a positive speed, or "off" to disable this clamp.
 cylinder_free_x_max_speed = 0.25
 # Hold x fixed until this simulation time; 0 releases immediately.
 cylinder_free_x_release_time = 0.0
@@ -31,6 +32,7 @@ cylinder_free_y_initial_velocity = 0.0
 cylinder_free_y_force_relaxation = 0.05
 # Use a positive percent of body diameter, or "off" to disable this clamp.
 cylinder_free_y_max_displacement_percent = 25.0
+# Use a positive speed, or "off" to disable this clamp.
 cylinder_free_y_max_speed = 0.25
 # Hold y fixed until this simulation time; 0 releases immediately.
 cylinder_free_y_release_time = 0.0

@@ -100,7 +100,15 @@ class TestIBMCircle:
         self.ibm.apply(u, v, time=0.0)
 
         expected_u = 2.0 * np.pi * frequency * amplitude_x
-        assert np.allclose(u[self.ibm.mask_u], expected_u)
+        weight_u = self.ibm._circle_force_weight(
+            self.ibm._u_x,
+            self.ibm._u_y,
+            cx,
+            cy,
+            r,
+            self.ibm._force_regularization_width,
+        )
+        assert np.allclose(u, expected_u * weight_u)
         assert np.allclose(v[self.ibm.mask_v], 0.0)
 
         self.ibm.apply(u, v, time=0.5)
@@ -128,7 +136,15 @@ class TestIBMCircle:
 
         expected_v = 2.0 * np.pi * frequency * amplitude_y
         assert np.allclose(u[self.ibm.mask_u], 0.0)
-        assert np.allclose(v[self.ibm.mask_v], expected_v)
+        weight_v = self.ibm._circle_force_weight(
+            self.ibm._v_x,
+            self.ibm._v_y,
+            cx,
+            cy,
+            r,
+            self.ibm._force_regularization_width,
+        )
+        assert np.allclose(v, expected_v * weight_v)
 
     def test_translating_force_diagnostic_uses_smooth_circle_weight(self):
         cx, cy, r = 1.0, 0.75, 0.22
@@ -237,6 +253,28 @@ class TestIBMCircle:
 
         assert spec.velocity_x == pytest.approx(0.0)
         assert spec.x == pytest.approx(cx + 0.05)
+
+    def test_free_x_circle_allows_disabled_speed_limit(self):
+        cx, cy, r = 1.0, 0.75, 0.2
+        self.ibm.add_free_y_circle(
+            cx,
+            cy,
+            r,
+            mass=1.0,
+            damping=0.0,
+            stiffness=0.0,
+            force_relaxation=1.0,
+            max_displacement=10.0,
+            max_speed=np.inf,
+            free_x=True,
+            free_y=False,
+        )
+        spec = self.ibm.free_y_circles[0]
+
+        spec.advance(force_x=2.0, force_y=0.0, moment_z=0.0, dt=1.0)
+
+        assert spec.velocity_x == pytest.approx(2.0)
+        assert spec.x == pytest.approx(cx + 2.0)
 
     def test_free_x_circle_release_time_delays_motion_and_wall_velocity(self):
         cx, cy, r = 1.0, 0.75, 0.2
@@ -377,8 +415,30 @@ class TestIBMCircle:
 
         i_u, j_u = np.argwhere(self.ibm.free_y_circles[0].mask_u)[0]
         i_v, j_v = np.argwhere(self.ibm.free_y_circles[0].mask_v)[0]
-        assert np.isclose(u[i_u, j_u], -omega * (self.g.yc[j_u] - cy))
-        assert np.isclose(v[i_v, j_v], omega * (self.g.xc[i_v] - cx))
+        weight_u = self.ibm._circle_force_weight(
+            self.ibm._u_x,
+            self.ibm._u_y,
+            cx,
+            cy,
+            r,
+            self.ibm._force_regularization_width,
+        )
+        weight_v = self.ibm._circle_force_weight(
+            self.ibm._v_x,
+            self.ibm._v_y,
+            cx,
+            cy,
+            r,
+            self.ibm._force_regularization_width,
+        )
+        assert np.isclose(
+            u[i_u, j_u],
+            weight_u[i_u, j_u] * -omega * (self.g.yc[j_u] - cy),
+        )
+        assert np.isclose(
+            v[i_v, j_v],
+            weight_v[i_v, j_v] * omega * (self.g.xc[i_v] - cx),
+        )
 
     def test_force_diagnostic_uses_local_face_measures_on_nonuniform_grid(self):
         xf = np.array([0.0, 0.2, 0.6, 1.0], dtype=float)
@@ -462,6 +522,52 @@ class TestIBMRectangle:
         assert state["shape"] == "square"
         assert state["last_force_x"] == pytest.approx(force_x)
         assert state["center_x"] > cx
+
+    def test_free_body_state_restores_from_snapshot_metadata(self):
+        g = CartesianGrid(24, 24, lx=2.0, ly=2.0)
+        ibm = ImmersedBoundary(g)
+        cx, cy, r = 1.0, 1.0, 0.2
+        ibm.add_free_y_circle(
+            cx,
+            cy,
+            r,
+            free_x=True,
+            free_y=True,
+            free_theta=True,
+            mass=2.0,
+            inertia=3.0,
+            max_displacement=1.0,
+        )
+        mask_u_before = ibm.mask_u.copy()
+
+        restored = ibm.restore_first_free_y_circle_state(
+            {
+                "cylinder_center_x": 1.2,
+                "cylinder_center_y": 0.8,
+                "cylinder_free_x_velocity": 0.3,
+                "cylinder_free_y_velocity": -0.4,
+                "cylinder_free_theta_angle": 0.1,
+                "cylinder_free_theta_angular_velocity": -0.2,
+                "ibm_force_x": 5.0,
+                "ibm_force_y": -6.0,
+                "ibm_moment_z": 7.0,
+            },
+            time=1.0,
+        )
+        state = ibm.first_free_y_circle_state(time=1.0)
+
+        assert restored
+        assert state is not None
+        assert state["center_x"] == pytest.approx(1.2)
+        assert state["center_y"] == pytest.approx(0.8)
+        assert state["velocity_x"] == pytest.approx(0.3)
+        assert state["velocity_y"] == pytest.approx(-0.4)
+        assert state["angle"] == pytest.approx(0.1)
+        assert state["angular_velocity"] == pytest.approx(-0.2)
+        assert state["last_force_x"] == pytest.approx(5.0)
+        assert state["last_force_y"] == pytest.approx(-6.0)
+        assert state["last_moment_z"] == pytest.approx(7.0)
+        assert not np.array_equal(mask_u_before, ibm.mask_u)
 
 
 class TestIBMAirfoil:

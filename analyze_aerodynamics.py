@@ -901,6 +901,7 @@ def plot_shedding_spectrum(
     u_ref: Optional[float] = None,
     mark_peaks: bool = False,
     show_title: bool = True,
+    results_dir: str = DEFAULT_RESULTS_DIR,
 ) -> None:
     """Plot the Fourier energy spectrum of C_l."""
     plt.switch_backend("Agg")
@@ -928,49 +929,48 @@ def plot_shedding_spectrum(
             "Insufficient oscillatory data to compute a Fourier spectrum.")
 
     _, _, freq_band, power_band = out
-    fig, ax = plt.subplots(figsize=(9, 5.5))
-    ax.loglog(freq_band, power_band, color="tab:blue", linewidth=1.8)
-    ax.set_xlabel("Frequency")
-    ax.set_ylabel("Fourier energy")
-    if show_title:
-        ax.set_title(
-            f"Lift Spectrum / Shedding Frequencies ({os.path.basename(csv_path)})",
-            fontsize=12,
-            fontweight="bold",
-        )
-    ax.grid(True, alpha=0.3)
-
-    ymax = float(np.max(power_band)) if power_band.size else 1.0
-    if mark_peaks:
-        peak_indices = _find_top_spectral_peaks(freq_band, power_band, max_peaks=3)
-        for rank, idx in enumerate(peak_indices, start=1):
-            f_peak = float(freq_band[idx])
-            p_peak = float(power_band[idx])
-            label = f"#{rank}: f={f_peak:.4g}"
-            if char_length is not None and u_ref is not None and u_ref > 0.0:
-                st = f_peak * float(char_length) / float(u_ref)
-                label += f", St={st:.4g}"
-            ax.annotate(
-                label,
-                xy=(f_peak, p_peak),
-                xytext=(8, 8 + 16 * (rank - 1)),
-                textcoords="offset points",
-                fontsize=9,
-                color="crimson",
-                arrowprops={"arrowstyle": "-", "color": "crimson", "lw": 0.8},
+    latex_style = {
+        "font.family": "serif",
+        "font.serif": ["Computer Modern Roman", "CMU Serif", "DejaVu Serif"],
+        "mathtext.fontset": "cm",
+        "axes.unicode_minus": False,
+        "axes.labelsize": 36,
+        "axes.titlesize": 36,
+        "xtick.labelsize": 30,
+        "ytick.labelsize": 30,
+    }
+    with plt.rc_context(latex_style):
+        fig, ax = plt.subplots(figsize=(14, 9))
+        ax.loglog(freq_band, power_band, color="tab:blue", linewidth=1.8)
+        ax.set_xlabel(r"$f$")
+        ax.set_ylabel(r"Fourier energy")
+        if show_title:
+            ax.set_title(
+                f"Lift spectrum / shedding frequencies ({os.path.basename(csv_path)})",
+                pad=18,
             )
+        ax.grid(True, alpha=0.28, linestyle="-")
 
-    ax.set_xlim(float(freq_band[0]), float(freq_band[-1]))
-    ax.set_ylim(
-        bottom=max(float(np.min(power_band)), np.finfo(float).eps),
-        top=max(1.05 * ymax, np.finfo(float).eps),
-    )
-    fig.tight_layout()
+        positive_power = power_band[power_band > 0.0]
+        if positive_power.size:
+            log_min = float(np.log10(np.min(positive_power)))
+            log_max = float(np.log10(np.max(positive_power)))
+            log_span = max(log_max - log_min, 1.0)
+            log_pad = 0.08 * log_span
+            y_bottom = 10.0 ** (log_min - log_pad)
+            y_top = 10.0 ** (log_max + log_pad)
+        else:
+            y_bottom = np.finfo(float).eps
+            y_top = 1.0
 
-    os.makedirs(DEFAULT_RESULTS_DIR, exist_ok=True)
-    save_path = os.path.join(DEFAULT_RESULTS_DIR, save_name)
-    fig.savefig(save_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
+        ax.set_xlim(float(freq_band[0]), float(freq_band[-1]))
+        ax.set_ylim(bottom=max(y_bottom, np.finfo(float).eps), top=y_top)
+        fig.tight_layout()
+
+        os.makedirs(results_dir, exist_ok=True)
+        save_path = os.path.join(results_dir, save_name)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
     print(f"Saved figure: {save_path}")
 
 

@@ -66,6 +66,7 @@ from analyze_aerodynamics import (
 from time_average_snapshots import plot_time_averaged_fields, save_time_averaged_fields
 from view_snapshot_viewer import find_latest_snapshot, plot_coeff_history
 from view_snapshot_viewer import plot_ibm_forcing, plot_vorticity_video
+from interpolate_restart import build_uniform_target_grid, interpolate_restart_file
 
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -223,6 +224,23 @@ def _parse_free_displacement_percent(value) -> float:
     return percent
 
 
+def _parse_free_positive_or_off(value) -> float:
+    text = str(value).strip().lower()
+    if text in {"off", "none", "disabled", "disable", "false", "no"}:
+        return float("inf")
+    try:
+        value_float = float(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(
+            "expected a positive value or 'off'"
+        ) from exc
+    if value_float <= 0.0:
+        raise argparse.ArgumentTypeError(
+            "expected a positive value or 'off'"
+        )
+    return value_float
+
+
 def _experimental_displacement_percent(
     exp_cfg: ConfigParser,
     enabled: bool,
@@ -237,10 +255,30 @@ def _experimental_displacement_percent(
     return _parse_free_displacement_percent(raw_value)
 
 
+def _experimental_positive_or_off(
+    exp_cfg: ConfigParser,
+    enabled: bool,
+    key: str,
+    default: float,
+) -> float:
+    if not enabled:
+        return default
+    raw_value = exp_cfg.get(key, None, str)
+    if raw_value is None:
+        return default
+    return _parse_free_positive_or_off(raw_value)
+
+
 def _format_free_displacement_percent(percent: float) -> str:
     if np.isinf(percent):
         return "off"
     return f"{percent:.4g}% D"
+
+
+def _format_free_positive_or_off(value: float) -> str:
+    if np.isinf(value):
+        return "off"
+    return f"{value:.4g}"
 
 
 def _truncate_grid_metadata_y(metadata: dict, trim_cells: int) -> dict:
@@ -556,15 +594,18 @@ def parse_args():
                        "Maximum free-x displacement as percent of cylinder "
                        "diameter, or 'off' to disable the displacement clamp"
                    ))
-    p.add_argument("--cylinder-free-x-max-speed", type=float,
-                   default=_experimental_default(
+    p.add_argument("--cylinder-free-x-max-speed",
+                   type=_parse_free_positive_or_off,
+                   default=_experimental_positive_or_off(
                        exp_cfg,
                        experimental_config_enabled,
                        "cylinder_free_x_max_speed",
                        0.25,
-                       float,
                    ),
-                   help="Maximum absolute streamwise speed for the free-x cylinder")
+                   help=(
+                       "Maximum absolute streamwise speed for the free-x "
+                       "body, or 'off' to disable the speed clamp"
+                   ))
     p.add_argument("--cylinder-free-x-release-time", type=float,
                    default=_experimental_default(
                        exp_cfg,
@@ -634,15 +675,18 @@ def parse_args():
                        "Maximum free-y displacement as percent of cylinder "
                        "diameter, or 'off' to disable the displacement clamp"
                    ))
-    p.add_argument("--cylinder-free-y-max-speed", type=float,
-                   default=_experimental_default(
+    p.add_argument("--cylinder-free-y-max-speed",
+                   type=_parse_free_positive_or_off,
+                   default=_experimental_positive_or_off(
                        exp_cfg,
                        experimental_config_enabled,
                        "cylinder_free_y_max_speed",
                        0.25,
-                       float,
                    ),
-                   help="Maximum absolute transverse speed for the free-y cylinder")
+                   help=(
+                       "Maximum absolute transverse speed for the free-y "
+                       "body, or 'off' to disable the speed clamp"
+                   ))
     p.add_argument("--cylinder-free-y-release-time", type=float,
                    default=_experimental_default(
                        exp_cfg,
@@ -718,24 +762,30 @@ def parse_args():
                        float,
                    ),
                    help="Exponential relaxation factor applied to the IBM moment")
-    p.add_argument("--cylinder-free-theta-max-angle-deg", type=float,
-                   default=_experimental_default(
+    p.add_argument("--cylinder-free-theta-max-angle-deg",
+                   type=_parse_free_positive_or_off,
+                   default=_experimental_positive_or_off(
                        exp_cfg,
                        experimental_config_enabled,
                        "cylinder_free_theta_max_angle_deg",
                        45.0,
-                       float,
                    ),
-                   help="Maximum absolute angular displacement in degrees")
-    p.add_argument("--cylinder-free-theta-max-angular-speed", type=float,
-                   default=_experimental_default(
+                   help=(
+                       "Maximum absolute angular displacement in degrees, "
+                       "or 'off' to disable the angle clamp"
+                   ))
+    p.add_argument("--cylinder-free-theta-max-angular-speed",
+                   type=_parse_free_positive_or_off,
+                   default=_experimental_positive_or_off(
                        exp_cfg,
                        experimental_config_enabled,
                        "cylinder_free_theta_max_angular_speed",
                        1.0,
-                       float,
                    ),
-                   help="Maximum absolute angular speed for the free-theta cylinder")
+                   help=(
+                       "Maximum absolute angular speed for the free-theta "
+                       "body, or 'off' to disable the speed clamp"
+                   ))
     p.add_argument("--cylinder-experiment", type=str,
                    choices=[
                        "circle",
@@ -999,6 +1049,33 @@ def parse_args():
                    default=post_cfg.get(
                        "auto_generate_vorticity_video", False, bool),
                    help="Automatically save an animated vorticity GIF from output snapshots")
+    p.add_argument("--auto-generate-restart-interpolation", type=str_to_bool,
+                   default=post_cfg.get(
+                       "auto_generate_restart_interpolation", False, bool),
+                   help="Automatically interpolate the latest snapshot onto a finer restart grid")
+    p.add_argument("--restart-interpolation-method", type=str,
+                   choices=["linear", "cubic", "cubic-spline", "cubic_spline", "spline"],
+                   default=post_cfg.get(
+                       "restart_interpolation_method", "linear", str),
+                   help="Interpolation method for automatic restart generation")
+    p.add_argument("--restart-interpolation-nx", type=int,
+                   default=post_cfg.get("restart_interpolation_nx", 0, int),
+                   help="Target restart-grid x cells; <=0 uses 2*nx")
+    p.add_argument("--restart-interpolation-ny", type=int,
+                   default=post_cfg.get("restart_interpolation_ny", 0, int),
+                   help="Target restart-grid y cells; <=0 uses 2*ny")
+    p.add_argument("--restart-interpolation-outdir", type=str,
+                   default=post_cfg.get(
+                       "restart_interpolation_outdir", "restart_output", str),
+                   help="Directory for automatic interpolated restart output")
+    p.add_argument("--restart-interpolation-filename", type=str,
+                   default=post_cfg.get(
+                       "restart_interpolation_filename", "restart_fine.npz", str),
+                   help="Filename for automatic interpolated restart snapshot")
+    p.add_argument("--restart-interpolation-write-grid", type=str_to_bool,
+                   default=post_cfg.get(
+                       "restart_interpolation_write_grid", True, bool),
+                   help="Write matching prepared-grid metadata with the restart snapshot")
     p.add_argument("--auto-vorticity-video-frame-stride", type=int,
                    default=post_cfg.get(
                        "auto_vorticity_video_frame_stride", 1, int),
@@ -1084,6 +1161,19 @@ def parse_args():
         p.error("Require x_max > x_min")
     if not args.y_max > args.y_min:
         p.error("Require y_max > y_min")
+    args.restart_interpolation_method = str(
+        args.restart_interpolation_method
+    ).strip().lower().replace("_", "-")
+    if args.restart_interpolation_method in {"cubic-spline", "spline"}:
+        args.restart_interpolation_method = "cubic"
+    if args.restart_interpolation_method not in {"linear", "cubic"}:
+        p.error("--restart-interpolation-method must be linear or cubic")
+    if args.restart_interpolation_nx < 0:
+        p.error("--restart-interpolation-nx must be non-negative")
+    if args.restart_interpolation_ny < 0:
+        p.error("--restart-interpolation-ny must be non-negative")
+    if not str(args.restart_interpolation_filename).strip():
+        p.error("--restart-interpolation-filename must not be empty")
     if (args.uniform_x_start is None) != (args.uniform_x_end is None):
         p.error("Provide both --uniform-x-start and --uniform-x-end, or neither")
     if (args.uniform_y_start is None) != (args.uniform_y_end is None):
@@ -2005,12 +2095,14 @@ def run(args, grid=None, grid_loaded_from_file=False):
                     f"release_y={args.cylinder_free_y_release_time:.4g}, "
                     "max displacement="
                     f"{_format_free_displacement_percent(free_max_displacement_percent)}, "
-                    f"max speed={free_max_speed:.4g}, "
+                    f"max speed={_format_free_positive_or_off(free_max_speed)}, "
                     f"I={args.cylinder_free_theta_inertia:.4g}, "
                     f"c_theta={args.cylinder_free_theta_damping:.4g}, "
                     f"k_theta={args.cylinder_free_theta_stiffness:.4g}, "
-                    f"max|theta|={args.cylinder_free_theta_max_angle_deg:.4g} deg, "
-                    f"max|omega|={args.cylinder_free_theta_max_angular_speed:.4g}"
+                    "max|theta|="
+                    f"{_format_free_positive_or_off(args.cylinder_free_theta_max_angle_deg)} deg, "
+                    "max|omega|="
+                    f"{_format_free_positive_or_off(args.cylinder_free_theta_max_angular_speed)}"
                 )
             if rotation_mode == "oscillatory":
                 print(
@@ -2068,7 +2160,7 @@ def run(args, grid=None, grid_loaded_from_file=False):
 
     resume_snapshot = _resolve_resume_snapshot(args)
     if resume_snapshot is not None:
-        u_restart, v_restart, p_restart, t_restart, _ = load_snapshot(
+        u_restart, v_restart, p_restart, t_restart, resume_metadata = load_snapshot(
             resume_snapshot, fmt="numpy"
         )
         expected_shapes = {
@@ -2090,6 +2182,11 @@ def run(args, grid=None, grid_loaded_from_file=False):
         solver.v[:, :] = v_restart
         solver.p[:, :] = p_restart
         solver.t = float(t_restart)
+        if solver.ibm is not None:
+            solver.ibm.restore_first_free_y_circle_state(
+                resume_metadata,
+                time=solver.t,
+            )
         if solver.t >= args.t_end - 1e-12:
             raise ValueError(
                 f"Resume snapshot t={solver.t:.4f} is already at/after "
@@ -2356,6 +2453,50 @@ def _plot_grid(grid, args):
     plt.close(fig)
 
 
+def _plot_auto_coeff_history(aero_series_path, settled_t_min):
+    plot_coeff_history(
+        aero_series_path,
+        save_name="coeff_history.png",
+        coeff_t_min=0.0,
+        settled_coeff_t_min=settled_t_min,
+    )
+
+
+def _resolve_restart_interpolation_output_path(args) -> str:
+    outdir = str(args.restart_interpolation_outdir).strip()
+    if not outdir:
+        outdir = "restart_output"
+    if not os.path.isabs(outdir):
+        outdir = os.path.join(SCRIPT_DIR, outdir)
+    filename = os.path.basename(str(args.restart_interpolation_filename).strip())
+    return os.path.join(outdir, filename)
+
+
+def _auto_generate_restart_interpolation(latest_snapshot: str, grid, args) -> str:
+    target_nx = int(args.restart_interpolation_nx)
+    target_ny = int(args.restart_interpolation_ny)
+    if target_nx <= 0:
+        target_nx = 2 * int(grid.nx)
+    if target_ny <= 0:
+        target_ny = 2 * int(grid.ny)
+
+    target_grid = build_uniform_target_grid(
+        nx=target_nx,
+        ny=target_ny,
+        source_grid=grid,
+    )
+    restart_path = _resolve_restart_interpolation_output_path(args)
+    interpolate_restart_file(
+        latest_snapshot,
+        restart_path,
+        target_grid=target_grid,
+        source_grid=grid,
+        method=args.restart_interpolation_method,
+        write_grid=bool(args.restart_interpolation_write_grid),
+    )
+    return restart_path
+
+
 def _run_auto_outputs(grid, args):
     results_dir = _ensure_results_dir()
 
@@ -2429,13 +2570,10 @@ def _run_auto_outputs(grid, args):
 
     if args.auto_generate_coeff_history:
         if aero_ready:
-            coeff_history_name = "coeff_history.png"
             try:
-                plot_coeff_history(
+                _plot_auto_coeff_history(
                     aero_series_path,
-                    save_name=coeff_history_name,
-                    coeff_t_min=args.auto_coeff_t_min,
-                    settled_coeff_t_min=args.auto_aero_stats_t_min,
+                    args.auto_aero_stats_t_min,
                 )
             except Exception as exc:
                 print(
@@ -2459,6 +2597,7 @@ def _run_auto_outputs(grid, args):
                     f_max=2.0,
                     char_length=char_length,
                     u_ref=args.inflow_u,
+                    results_dir=results_dir,
                 )
             except Exception as exc:
                 print(
@@ -2503,11 +2642,12 @@ def _run_auto_outputs(grid, args):
         args.auto_generate_ibm_forcing
         or args.auto_generate_vorticity_video
         or args.auto_generate_pressure_coefficient_theta
+        or args.auto_generate_restart_interpolation
     ):
         latest_snapshot = find_latest_snapshot(dirpath=args.outdir)
         if latest_snapshot is None:
             print(
-                "  Warning: automatic snapshot plots skipped because no snapshots were found.")
+                "  Warning: automatic snapshot post-processing skipped because no snapshots were found.")
             return
 
     if args.auto_generate_ibm_forcing:
@@ -2545,6 +2685,17 @@ def _run_auto_outputs(grid, args):
             )
         except Exception as exc:
             print(f"  Warning: automatic vorticity video failed: {exc}")
+
+    if args.auto_generate_restart_interpolation:
+        try:
+            restart_path = _auto_generate_restart_interpolation(
+                latest_snapshot,
+                grid,
+                args,
+            )
+            print(f"Saved interpolated restart snapshot: {restart_path}")
+        except Exception as exc:
+            print(f"  Warning: automatic restart interpolation failed: {exc}")
 
     if args.auto_generate_time_averaged_fields or args.auto_generate_time_averaged_plots:
         try:
