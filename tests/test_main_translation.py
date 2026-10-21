@@ -210,6 +210,35 @@ def _write_minimal_configs(tmp_path, experiment_text: str, post_text: str = ""):
     return config_path, experiment_path, post_path
 
 
+@pytest.mark.parametrize("override", [False, True])
+def test_post_config_reads_fourier_window_options(tmp_path, monkeypatch, override):
+    config_path, experiment_path, post_path = _write_minimal_configs(
+        tmp_path, "", "auto_shedding_spectrum_window = hann\n"
+        "auto_shedding_spectrum_num_windows = 4\n")
+    argv = ["main.py", "--config", str(config_path), "--experiment-config",
+            str(experiment_path), "--post-config", str(post_path)]
+    if override:
+        argv += ["--auto-shedding-spectrum-window", "none",
+                 "--auto-shedding-spectrum-num-windows", "2"]
+    monkeypatch.setattr(sys, "argv", argv)
+    args = parse_args()
+    assert args.auto_shedding_spectrum_window == ("none" if override else "hann")
+    assert args.auto_shedding_spectrum_num_windows == (2 if override else 4)
+
+
+@pytest.mark.parametrize("post_text", [
+    "auto_shedding_spectrum_window = invalid\n",
+    "auto_shedding_spectrum_num_windows = 0\n",
+])
+def test_post_config_rejects_invalid_fourier_options(tmp_path, monkeypatch, post_text):
+    config_path, experiment_path, post_path = _write_minimal_configs(tmp_path, "", post_text)
+    monkeypatch.setattr(sys, "argv", [
+        "main.py", "--config", str(config_path), "--experiment-config",
+        str(experiment_path), "--post-config", str(post_path)])
+    with pytest.raises(SystemExit):
+        parse_args()
+
+
 def test_post_config_reads_restart_interpolation_options(tmp_path, monkeypatch):
     config_path, experiment_path, post_path = _write_minimal_configs(
         tmp_path,

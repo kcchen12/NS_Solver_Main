@@ -1136,6 +1136,20 @@ def parse_args():
     p.add_argument("--auto-aero-t-min", type=float,
                    default=post_cfg.get("auto_aero_t_min", 1.0, float),
                    help="Minimum time used for auto-generated aerodynamic frequency analysis")
+    p.add_argument("--auto-shedding-spectrum-t-min", type=float,
+                   default=post_cfg.get(
+                       "auto_shedding_spectrum_t_min",
+                       post_cfg.get("auto_aero_t_min", 1.0, float),
+                       float,
+                   ),
+                   help="Minimum time used for the auto-generated Fourier shedding spectrum")
+    p.add_argument("--auto-shedding-spectrum-window", type=str.lower,
+                   choices=("none", "hann", "hanning"),
+                   default=post_cfg.get("auto_shedding_spectrum_window", "none", str),
+                   help="Taper applied to each Fourier segment: none or hann (hanning)")
+    p.add_argument("--auto-shedding-spectrum-num-windows", type=int,
+                   default=post_cfg.get("auto_shedding_spectrum_num_windows", 1, int),
+                   help="Number of non-overlapping Fourier segments to average (>= 1)")
     p.add_argument("--auto-aero-stats-t-min", type=float,
                    default=post_cfg.get(
                        "auto_aero_stats_t_min",
@@ -1144,6 +1158,11 @@ def parse_args():
                    ),
                    help="Minimum time used for auto-generated drag/lift statistics")
     args = p.parse_args()
+
+    if args.auto_shedding_spectrum_window not in ("none", "hann", "hanning"):
+        p.error("auto_shedding_spectrum_window must be none, hann, or hanning")
+    if args.auto_shedding_spectrum_num_windows < 1:
+        p.error("auto_shedding_spectrum_num_windows must be >= 1")
 
     args.x_min = 0.0 if args.x_min is None else float(args.x_min)
     args.y_min = 0.0 if args.y_min is None else float(args.y_min)
@@ -2592,7 +2611,9 @@ def _run_auto_outputs(grid, args):
                 plot_shedding_spectrum(
                     aero_series_path,
                     save_name="shedding_spectrum.png",
-                    t_min=args.auto_aero_t_min,
+                    t_min=args.auto_shedding_spectrum_t_min,
+                    window=args.auto_shedding_spectrum_window,
+                    num_windows=args.auto_shedding_spectrum_num_windows,
                     f_min=0.05,
                     f_max=2.0,
                     char_length=char_length,

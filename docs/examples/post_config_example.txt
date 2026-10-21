@@ -35,3 +35,8 @@ surface_force_sample_offset_factor = 0.5
 # Time trimming for post-processing
 auto_coeff_t_min = 0.5
 auto_aero_t_min = 1.0
+auto_shedding_spectrum_t_min = 1.0
+
+# Reduce spectral leakage with Hann-tapered, averaged Fourier segments.
+auto_shedding_spectrum_window = hann
+auto_shedding_spectrum_num_windows = 4

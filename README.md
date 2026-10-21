@@ -160,6 +160,22 @@ Initialization and runtime:
 - `surface_force_sample_offset_factor`: near-cylinder offset used by surface-stress aerodynamic post-processing
 - `auto_coeff_t_min`: minimum time for automatic coefficient-history plotting
 - `auto_aero_t_min`: minimum time for automatic aerodynamic analysis
+- `auto_shedding_spectrum_t_min`: minimum time for the automatic Fourier shedding spectrum; defaults to `auto_aero_t_min` if omitted
+- `auto_shedding_spectrum_window`: Fourier taper, `none` (default) or `hann` (`hanning` is an alias)
+- `auto_shedding_spectrum_num_windows`: positive integer number of Fourier segments to average; defaults to `1`
+- `auto_aero_stats_t_min`: minimum time for automatic drag/lift statistics
+
+For example, set `auto_shedding_spectrum_window = hann` and
+`auto_shedding_spectrum_num_windows = 4` in `post_config.txt`, or pass
+`--auto-shedding-spectrum-window hann --auto-shedding-spectrum-num-windows 4`.
+After time trimming and any uniform resampling, the spectrum uses equal-length,
+non-overlapping segments, subtracts each segment's mean, applies the taper,
+and averages their power spectra with taper-energy normalization. Any remainder
+(fewer samples than the number of windows) is discarded from the end.
+Each segment needs at least eight samples. More segments smooth the spectrum
+but reduce frequency resolution; one Hann window tapers the entire selected
+record. These options also work as `window` and `num_windows` arguments to
+`plot_shedding_spectrum()` and leave other aerodynamic frequency estimates unchanged.
 
 ## Runtime Notes
 

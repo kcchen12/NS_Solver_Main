@@ -27,4 +27,7 @@ restart_interpolation_write_grid = true
 surface_force_sample_offset_factor = 0.5
 auto_coeff_t_min = 100.0
 auto_aero_t_min = 100.0
+auto_shedding_spectrum_t_min = 100.0
+auto_shedding_spectrum_window = hann
+auto_shedding_spectrum_num_windows = 4
 auto_aero_stats_t_min = 100.0

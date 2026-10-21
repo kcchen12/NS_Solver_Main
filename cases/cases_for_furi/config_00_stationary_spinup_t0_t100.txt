@@ -34,7 +34,7 @@ outflow_speed = 1.0
 t_end = 101.0
 cfl = 0.25
 save_dt = 0.1
-outdir = cases/re100_640x1280/output/00_stationary_spinup_t0_t100
+outdir = cases/cases_for_furi/output/00_stationary_spinup_t0_t100
 resume_from =
 resume_latest = false
 

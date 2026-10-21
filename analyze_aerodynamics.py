@@ -473,8 +473,25 @@ def _compute_fourier_power_spectrum(
     t_min: float,
     f_min: float,
     f_max: float,
+    window: str = "none",
+    num_windows: int = 1,
 ) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
-    """Return (t_uniform, signal_uniform, freq_band, power_band) for a one-sided FFT."""
+    """Return uniform data and an averaged nonnegative-frequency power spectrum.
+
+    Split the trimmed, resampled data into ``num_windows`` equal-length,
+    non-overlapping segments, discarding fewer than ``num_windows`` trailing
+    samples if necessary. Remove each segment's mean and optionally apply a
+    periodic Hann taper. Normalize by segment length times taper energy so
+    integrated power remains comparable to the original rectangular FFT.
+    Positive-frequency bins retain the historical undoubled convention.
+    """
+    window = str(window).lower()
+    if window not in ("none", "hann", "hanning"):
+        raise ValueError("window must be 'none', 'hann', or 'hanning'")
+    if isinstance(num_windows, (bool, np.bool_)) or not isinstance(
+        num_windows, (int, np.integer)
+    ) or num_windows < 1:
+        raise ValueError("num_windows must be a positive integer")
     mask = t >= t_min
     ts = t[mask]
     ys = signal[mask]
@@ -502,9 +519,22 @@ def _compute_fourier_power_spectrum(
         ys = np.interp(ts_uniform, ts, ys)
         ts = ts_uniform
 
-    freq = np.fft.rfftfreq(ts.size, d=dt_ref)
-    spectrum = np.fft.rfft(ys)
-    power = (np.abs(spectrum) ** 2) / float(ts.size**2)
+    segment_size = ts.size // num_windows
+    if segment_size < 8:
+        raise ValueError(
+            f"num_windows={num_windows} leaves fewer than 8 samples per window "
+            f"({ts.size} samples available after time trimming/resampling)"
+        )
+    segments = ys[:segment_size * num_windows].reshape(num_windows, segment_size)
+    segments = segments - np.mean(segments, axis=1, keepdims=True)
+    # np.hanning(n + 1)[:-1] gives the periodic Hann window used for FFTs.
+    taper = (np.ones(segment_size) if window == "none"
+             else np.hanning(segment_size + 1)[:-1])
+    freq = np.fft.rfftfreq(segment_size, d=dt_ref)
+    spectrum = np.fft.rfft(segments * taper, axis=1)
+    power = np.mean(np.abs(spectrum) ** 2, axis=0) / (
+        segment_size * np.sum(taper ** 2)
+    )
 
     band = (freq >= f_min) & (freq <= f_max)
     if not np.any(band):
@@ -902,6 +932,8 @@ def plot_shedding_spectrum(
     mark_peaks: bool = False,
     show_title: bool = True,
     results_dir: str = DEFAULT_RESULTS_DIR,
+    window: str = "none",
+    num_windows: int = 1,
 ) -> None:
     """Plot the Fourier energy spectrum of C_l."""
     plt.switch_backend("Agg")
@@ -923,6 +955,8 @@ def plot_shedding_spectrum(
         t_min=t_min,
         f_min=f_min,
         f_max=f_max,
+        window=window,
+        num_windows=num_windows,
     )
     if out is None:
         raise ValueError(

@@ -1,4 +1,4 @@
-# Stationary cylinder production run from the shared t=100 spin-up state.
+# Free angular cylinder motion from the shared t=100 spin-up state.
 
 nx = 640
 ny = 1280
@@ -34,8 +34,8 @@ outflow_speed = 1.0
 t_end = 225.0
 cfl = 0.25
 save_dt = 0.1
-outdir = cases/re100_640x1280/output/01_stationary_from_t100_t225
-resume_from = cases/re100_640x1280/output/00_stationary_spinup_t0_t100/snap_100.9001.npz
+outdir = cases/cases_for_furi/output/03_rotation_from_t100_t225
+resume_from = cases/cases_for_furi/output/00_stationary_spinup_t0_t100/snap_100.9001.npz
 resume_latest = false
 
 uniform_grid = false
@@ -52,6 +52,7 @@ cylinder_center_x = 0.0
 cylinder_center_y = 0.0
 cylinder_radius = 0.5
 
+# Free theta motion is enabled in experimental_config_theta_dof.txt.
 cylinder_rotation_mode = stationary
 cylinder_rotation_amplitude = 0.0
 cylinder_rotation_frequency = 0.0

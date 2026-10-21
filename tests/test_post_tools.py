@@ -2,6 +2,8 @@
 
 import os
 import numpy as np
+import pytest
+from scipy.signal import welch
 
 import view_snapshot_viewer
 from interpolate_restart import (
@@ -10,6 +12,7 @@ from interpolate_restart import (
     interpolate_restart_file,
 )
 from analyze_aerodynamics import (
+    _compute_fourier_power_spectrum,
     _compute_coefficients,
     _compute_forces,
     _compute_pressure_forces,
@@ -44,6 +47,52 @@ from view_snapshot_viewer import (
 
 
 class TestAnalyzeAerodynamicsHelpers:
+    def test_fourier_default_matches_original_fft(self):
+        t = np.arange(1024) * 0.05
+        y = 3.0 + np.sin(2 * np.pi * 0.43 * t)
+        ts, _, freq, power = _compute_fourier_power_spectrum(t, y, 5.0, 0.0, 10.0)
+        selected = y[t >= 5.0]
+        expected = np.abs(np.fft.rfft(selected - selected.mean())) ** 2 / selected.size**2
+        np.testing.assert_allclose(ts, t[t >= 5.0])
+        np.testing.assert_allclose(freq, np.fft.rfftfreq(selected.size, d=0.05))
+        np.testing.assert_allclose(power, expected, atol=1e-15)
+
+    def test_hann_reduces_far_band_spectral_leakage(self):
+        t = np.arange(1024) * 0.05
+        frequency = 0.437
+        y = np.sin(2 * np.pi * frequency * t)
+        _, _, freq, rectangular = _compute_fourier_power_spectrum(t, y, 0.0, 0.0, 10.0)
+        _, _, _, tapered = _compute_fourier_power_spectrum(
+            t, y, 0.0, 0.0, 10.0, window="hann")
+        # Exclude the DC neighborhood affected by subtracting a finite-record mean.
+        far_band = (freq > 0.1) & (np.abs(freq - frequency) > 0.15)
+        assert tapered[far_band].sum() < 0.01 * rectangular[far_band].sum()
+        assert abs(freq[np.argmax(tapered)] - frequency) <= 1.0 / (t.size * 0.05)
+
+    @pytest.mark.parametrize("window", ["none", "hann", "hanning"])
+    def test_fourier_segment_average_matches_welch(self, window):
+        # Trim first, then split 1027 samples into four 256-sample segments.
+        t = np.arange(1127) * 0.125
+        y = np.random.default_rng(4).normal(size=t.size) + 2.0
+        _, _, freq, power = _compute_fourier_power_spectrum(
+            t, y, 12.5, 0.0, 4.0, window=window, num_windows=4)
+        expected_freq, density = welch(
+            y[100:], fs=8.0, window="boxcar" if window == "none" else "hann",
+            nperseg=256, noverlap=0, detrend="constant", scaling="density")
+        # Convert doubled one-sided density to the existing undoubled power bins.
+        density[1:-1] /= 2.0
+        np.testing.assert_allclose(freq, expected_freq)
+        np.testing.assert_allclose(power, density / (256 * 0.125), atol=1e-15)
+
+    @pytest.mark.parametrize("kwargs", [
+        {"window": "invalid"}, {"num_windows": 0}, {"num_windows": -1},
+        {"num_windows": 1.5}, {"num_windows": True}, {"num_windows": 9},
+    ])
+    def test_fourier_rejects_invalid_window_options(self, kwargs):
+        t = np.arange(64, dtype=float)
+        with pytest.raises(ValueError):
+            _compute_fourier_power_spectrum(t, np.sin(t), 0.0, 0.0, 0.5, **kwargs)
+
     def test_read_config_parses_bool_and_float(self, tmp_path):
         config_path = tmp_path / "config.txt"
         config_path.write_text(
@@ -59,7 +108,8 @@ class TestAnalyzeAerodynamicsHelpers:
         assert config["re"] == 100.0
         assert "note" not in config
 
-    def test_plot_shedding_spectrum_writes_png(self, tmp_path):
+    @pytest.mark.parametrize("window,num_windows", [("none", 1), ("hann", 4)])
+    def test_plot_shedding_spectrum_writes_png(self, tmp_path, window, num_windows):
         results_dir = tmp_path / "results"
         results_dir.mkdir()
         old_cwd = os.getcwd()
@@ -77,6 +127,8 @@ class TestAnalyzeAerodynamicsHelpers:
             plot_shedding_spectrum(
                 str(csv_path),
                 save_name="test_shedding_spectrum.png",
+                window=window,
+                num_windows=num_windows,
                 t_min=0.0,
                 f_min=0.1,
                 f_max=1.5,
