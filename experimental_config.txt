@@ -10,6 +10,11 @@ enable_experimental_config = true
 truncate_y_cells = 0
 
 # Cylinder experiment controls
+# Optional stationary cylinder behind the original one, along +x.
+# Same diameter D; L is center-to-center distance, so surface gap is (L/D - 1)*D.
+cylinder_downstream = true
+cylinder_downstream_spacing_ratio = 3.0
+
 # If true, request spring-mass-damper bluff-body degrees of freedom.
 # free-x allows streamwise motion; free-y allows transverse motion.
 cylinder_free_x_dof = false
@@ -26,6 +31,9 @@ cylinder_free_x_max_speed = 0.25
 cylinder_free_x_release_time = 0.0
 
 cylinder_free_y_dof = true
+# Write y_velocity_squared.csv every step and plot it at run completion.
+# Multiply velocity squared by the damping coefficient for damper power.
+cylinder_free_y_monitor_velocity_squared = false
 cylinder_free_y_mass = 100.0
 cylinder_free_y_damping = 2.0
 cylinder_free_y_stiffness = 20.0

@@ -3,8 +3,8 @@
 # Format: key = value
 
 # Grid parameters
-nx = 640
-ny = 1280
+nx = 128
+ny = 256
 
 # Domain dimensions
 lx = 25.0
@@ -47,7 +47,7 @@ outflow_mode = convective
 outflow_speed = 1.0
 
 # Time integration
-t_end = 105.0
+t_end = 100.0
 cfl = 0.25
 
 # I/O parameters

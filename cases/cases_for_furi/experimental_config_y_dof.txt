@@ -3,6 +3,10 @@ enable_experimental_config = true
 
 truncate_y_cells = 0
 
+# Optional stationary downstream cylinder; center-to-center L/D, same diameter.
+cylinder_downstream = false
+cylinder_downstream_spacing_ratio = 3.0
+
 cylinder_free_x_dof = false
 cylinder_free_x_mass = 100.0
 cylinder_free_x_damping = 5.0
@@ -14,6 +18,8 @@ cylinder_free_x_max_speed = 0.25
 cylinder_free_x_release_time = 0.0
 
 cylinder_free_y_dof = true
+# Record y-dot squared every step and save its mechanical-power-proxy plot.
+cylinder_free_y_monitor_velocity_squared = true
 cylinder_free_y_mass = 100.0
 cylinder_free_y_damping = 2.0
 cylinder_free_y_stiffness = 101.0

@@ -1475,6 +1475,17 @@ class ImmersedBoundary:
                     dt=dt,
                     rho=rho,
                 )
+                # Keep the reported total inclusive of fixed bodies in mixed
+                # fixed/moving configurations. Per-free-body loads above stay
+                # local to each moving body's mask/weights.
+                force_x += rho * float(np.sum(
+                    (u[self._base_mask_u] - float(u_body))
+                    * self._u_face_measure[self._base_mask_u]
+                )) / dt
+                force_y += rho * float(np.sum(
+                    (v[self._base_mask_v] - float(v_body))
+                    * self._v_face_measure[self._base_mask_v]
+                )) / dt
             else:
                 force_x = (
                     rho

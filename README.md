@@ -125,15 +125,29 @@ Initialization and runtime:
 - `enable_experimental_config`: master switch; when `false`, all other options in `experimental_config.txt` are ignored
 - `truncate_y_cells`: drop this many cells from both the bottom and top y boundaries before running
 - `cylinder_experiment`: body shape selector, one of `circle`, `top-indent`, `square`, `airfoil`, or `polygon`
+- `cylinder_downstream`: add an optional stationary circular cylinder downstream along +x; defaults to `false`
+- `cylinder_downstream_spacing_ratio`: center-to-center spacing `L/D`, default `3.0`, where `D` is the original cylinder diameter; must be finite and greater than `1`
 - `polygon_points`, `polygon_angle_deg`: custom body-local vertices and initial orientation when `cylinder_experiment = polygon`
 - `cylinder_free_x_dof`, `cylinder_free_y_dof`, `cylinder_free_theta_dof`: enable streamwise, transverse, and/or angular spring-mass-damper motion for the selected bluff body
 - `cylinder_free_x_mass`, `cylinder_free_y_mass`, `cylinder_free_x_damping`, `cylinder_free_y_damping`, `cylinder_free_x_stiffness`, `cylinder_free_y_stiffness`: spring-mass-damper parameters for the free body
 - `cylinder_free_x_initial_velocity`, `cylinder_free_y_initial_velocity`: initial streamwise/transverse cylinder velocity
+- `cylinder_free_y_monitor_velocity_squared`: when `true` with free Y motion, stream time, Y velocity, and Y velocity squared to `outdir/y_velocity_squared.csv` at the initial state and every solver step; include Y velocity squared in verbose diagnostics and save `outdir/y_velocity_squared.png` at completion. Defaults to `false`; enabled in the free-Y case config. The CSV is flushed every step for monitoring during a run. Each run (including a restart) writes a fresh history beginning at its initial/resumed time. This option works independently of post-processing plot settings. Velocity squared is a mechanical power proxy; constant damper power is `cylinder_free_y_damping * velocity_y_squared`.
 - `cylinder_free_x_max_displacement_percent`, `cylinder_free_y_max_displacement_percent`: displacement clamp as percent of body diameter; set to `off` to disable the clamp
 - `cylinder_free_x_max_speed`, `cylinder_free_y_max_speed`: speed clamp for free translation; set to `off` to disable the clamp
 - `cylinder_free_x_release_time`, `cylinder_free_y_release_time`: hold the corresponding free axis fixed until this simulation time; `0` releases immediately
 - `cylinder_free_theta_inertia`, `cylinder_free_theta_damping`, `cylinder_free_theta_stiffness`: torsional oscillator parameters for angular body motion
 - `cylinder_indent_width`, `cylinder_indent_depth`
+
+To simulate two cylinders in tandem, set `enable_experimental_config = true`,
+`cylinder_downstream = true`, and `cylinder_downstream_spacing_ratio = 3.0`
+in `experimental_config.txt`. With `cylinder = true` in the main config and
+`cylinder_experiment = circle`, this places an equal-diameter stationary cylinder
+at `(x_original + 3D, y_original)`, using the original reference center. Both
+cylinders must fit strictly inside the domain. Existing primary-cylinder motion
+settings still apply only to the original body; the downstream cylinder stays
+fixed. Snapshot metadata records both geometries. Existing surface-force
+coefficient analysis measures the original cylinder; IBM force totals include
+both bodies. Body contact/collision dynamics are not modeled.
 
 ### Post Config
 

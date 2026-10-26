@@ -121,6 +121,24 @@ def _load_cylinder_overlay_geometry_for_snapshot(
     return _load_cylinder_overlay_geometry(config_path=config_path)
 
 
+def _load_downstream_cylinder_overlay_geometry_for_snapshot(
+    file_path: str,
+) -> tuple[float, float, float] | None:
+    """Read the fixed downstream cylinder from runtime snapshot metadata."""
+    try:
+        with np.load(file_path) as data:
+            if not bool(np.asarray(data.get("meta_cylinder_downstream_enabled", False)).item()):
+                return None
+            geometry = tuple(float(np.asarray(data[key]).item()) for key in (
+                "meta_cylinder_downstream_center_x", "meta_cylinder_downstream_center_y",
+                "meta_cylinder_downstream_radius"))
+            if np.all(np.isfinite(geometry)) and geometry[2] > 0.0:
+                return geometry
+    except (OSError, ValueError, KeyError):
+        pass
+    return None
+
+
 def ensure_results_dir(results_dir: str = "results") -> str:
     """Ensure the results directory exists."""
     if not os.path.exists(results_dir):
@@ -613,8 +631,12 @@ def plot_vorticity_video(
             paths[0],
             config_path=config_path,
         )
-    if circle_geometry is not None:
-        cx, cy, radius = circle_geometry
+    overlay_geometries = [circle_geometry] if circle_geometry is not None else []
+    if draw_cylinder_overlay:
+        downstream_geometry = _load_downstream_cylinder_overlay_geometry_for_snapshot(paths[0])
+        if downstream_geometry is not None:
+            overlay_geometries.append(downstream_geometry)
+    for cx, cy, radius in overlay_geometries:
         ax.add_patch(
             Circle(
                 (cx, cy),

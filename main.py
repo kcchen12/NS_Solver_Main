@@ -39,6 +39,8 @@ Command-line arguments override config file values::
 """
 
 import argparse
+import csv
+from contextlib import contextmanager
 import os
 import numpy as np
 
@@ -513,6 +515,16 @@ def parse_args():
     p.add_argument("--cylinder-center-y", type=float,
                    default=cfg.get("cylinder_center_y", -1.0, float),
                    help="Cylinder center y-coordinate in physical units (<0 uses default ly/2)")
+    p.add_argument("--cylinder-downstream", type=str_to_bool,
+                   default=_experimental_default(
+                       exp_cfg, experimental_config_enabled,
+                       "cylinder_downstream", False, bool),
+                   help="Experimental option: add a stationary equal-diameter downstream cylinder")
+    p.add_argument("--cylinder-downstream-spacing-ratio", type=float,
+                   default=_experimental_default(
+                       exp_cfg, experimental_config_enabled,
+                       "cylinder_downstream_spacing_ratio", 3.0, float),
+                   help="Downstream center-to-center spacing L/D (must exceed 1)")
     p.add_argument("--cylinder-free-y-dof", type=str_to_bool,
                    default=_experimental_default(
                        exp_cfg,
@@ -525,6 +537,11 @@ def parse_args():
                        "Experimental option: request one-degree-of-freedom "
                        "transverse cylinder motion for VIV studies"
                    ))
+    p.add_argument("--cylinder-free-y-monitor-velocity-squared", type=str_to_bool,
+                   default=_experimental_default(
+                       exp_cfg, experimental_config_enabled,
+                       "cylinder_free_y_monitor_velocity_squared", False, bool),
+                   help="Record free-y velocity squared every step and save a power-proxy plot")
     p.add_argument("--cylinder-free-x-dof", type=str_to_bool,
                    default=_experimental_default(
                        exp_cfg,
@@ -1207,6 +1224,10 @@ def parse_args():
     args.nonuniform_mode = "center-uniform"
     args.experimental_config_enabled = bool(experimental_config_enabled)
     _apply_y_truncation_to_args(args, p)
+    try:
+        _resolve_downstream_cylinder_geometry(args)
+    except ValueError as exc:
+        p.error(str(exc))
     return args
 
 
@@ -1284,6 +1305,26 @@ def _resolve_cylinder_geometry(args) -> tuple[float, float, float]:
     cy = args.cylinder_center_y if args.cylinder_center_y >= 0.0 else args.y_min + 0.5 * args.ly
     radius = args.cylinder_radius if args.cylinder_radius > 0.0 else args.ly / 8.0
     return cx, cy, radius
+
+
+def _resolve_downstream_cylinder_geometry(args) -> tuple[float, float, float] | None:
+    """Fixed rear cylinder, relative to the primary's configured reference center."""
+    if not getattr(args, "cylinder_downstream", False):
+        return None
+    if not args.cylinder:
+        raise ValueError("cylinder_downstream requires cylinder = true")
+    if _resolve_experiment_overrides(args) != "circle":
+        raise ValueError("cylinder_downstream requires cylinder_experiment = circle")
+    ratio = float(args.cylinder_downstream_spacing_ratio)
+    if not np.isfinite(ratio) or ratio <= 1.0:
+        raise ValueError("cylinder_downstream_spacing_ratio (L/D) must be finite and > 1")
+    cx, cy, radius = _resolve_cylinder_geometry(args)
+    rear_x = cx + ratio * 2.0 * radius
+    for name, center_x in (("primary", cx), ("downstream", rear_x)):
+        if not (args.x_min < center_x - radius and center_x + radius < args.x_max
+                and args.y_min < cy - radius and cy + radius < args.y_max):
+            raise ValueError(f"{name} cylinder must lie strictly inside the domain")
+    return rear_x, cy, radius
 
 
 def _resolve_cylinder_translation(args, cx: float, cy: float, radius: float) -> dict:
@@ -1452,6 +1493,12 @@ def _plot_ibm_outline(
         cx, cy = center_override
     shape = _resolve_experiment_overrides(args)
     theta = np.linspace(0.0, 2.0 * np.pi, 361)
+    downstream = _resolve_downstream_cylinder_geometry(args)
+    if downstream is not None:
+        rear_x, rear_y, rear_radius = downstream
+        ax.plot(rear_x + rear_radius * np.cos(theta),
+                rear_y + rear_radius * np.sin(theta),
+                color=color, linewidth=linewidth, zorder=6)
     x = cx + radius * np.cos(theta)
     y = cy + radius * np.sin(theta)
     if shape == "circle":
@@ -1619,6 +1666,16 @@ def _snapshot_metadata(args, solver) -> dict:
         metadata["cylinder_center_x"] = cx
         metadata["cylinder_center_y"] = cy
         metadata["cylinder_radius"] = radius
+    downstream = _resolve_downstream_cylinder_geometry(args)
+    metadata["cylinder_downstream_enabled"] = downstream is not None
+    if downstream is not None:
+        rear_x, rear_y, rear_radius = downstream
+        metadata.update({
+            "cylinder_downstream_center_x": rear_x,
+            "cylinder_downstream_center_y": rear_y,
+            "cylinder_downstream_radius": rear_radius,
+            "cylinder_downstream_spacing_ratio": float(args.cylinder_downstream_spacing_ratio),
+        })
     return metadata
 
 
@@ -1785,6 +1842,48 @@ def get_runtime_grid(args):
     if args.grid_type == "nonuniform":
         return prepare_nonuniform_grid(args), False
     return prepare_uniform_grid(args), False
+
+
+@contextmanager
+def _monitor_y_velocity_squared(args, solver, is_root):
+    """Stream primary-body y velocity squared to disk at every solver step."""
+    if not (is_root and args.cylinder and args.cylinder_free_y_dof
+            and getattr(args, "cylinder_free_y_monitor_velocity_squared", False)):
+        yield lambda: None
+        return
+
+    path = os.path.join(args.outdir, "y_velocity_squared.csv")
+    with open(path, "w", newline="", encoding="utf-8") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(["t", "velocity_y", "velocity_y_squared"])
+
+        def record():
+            state = solver.ibm.first_free_y_circle_state(time=solver.t)
+            velocity = float(state["velocity_y"])
+            writer.writerow([solver.t, velocity, velocity ** 2])
+            stream.flush()
+            return velocity ** 2
+
+        yield record
+
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print(f"  Y velocity squared saved to {path}; matplotlib unavailable, skipping plot.")
+        return
+    data = np.loadtxt(path, delimiter=",", skiprows=1, ndmin=2)
+    fig, ax = plt.subplots(figsize=(9, 4))
+    ax.plot(data[:, 0], data[:, 2])
+    ax.set(xlabel="Simulation time", ylabel=r"$\dot{y}^{2}$",
+           title="Y velocity squared (mechanical power proxy)")
+    ax.grid(True, alpha=0.25)
+    fig.tight_layout()
+    plot_path = os.path.join(args.outdir, "y_velocity_squared.png")
+    fig.savefig(plot_path, dpi=150)
+    plt.close(fig)
+    print(f"  Y velocity squared saved to {path} and {plot_path}")
 
 
 def run(args, grid=None, grid_loaded_from_file=False):
@@ -2148,6 +2247,15 @@ def run(args, grid=None, grid_loaded_from_file=False):
                 )
 
     # ------------------------------------------------------------------
+    # The downstream cylinder is fixed in space, including when the primary moves.
+    # add_circle contributes to the base masks retained by dynamic IBM updates.
+    downstream = _resolve_downstream_cylinder_geometry(args)
+    if downstream is not None:
+        ibm.add_circle(*downstream)
+        if is_root and args.verbose:
+            print(f"  Downstream cyl.: center=({downstream[0]:.4g}, {downstream[1]:.4g}), "
+                  f"radius={downstream[2]:.4g}, L/D={args.cylinder_downstream_spacing_ratio:.4g}")
+
     # Solver
     # ------------------------------------------------------------------
     nu = _kinematic_viscosity(args, bc.u_inf, r)
@@ -2234,31 +2342,36 @@ def run(args, grid=None, grid_loaded_from_file=False):
     if is_root and args.verbose:
         print(f"\n  Starting time loop …")
 
-    while solver.t < args.t_end - 1e-12:
-        dt = solver.suggest_dt(cfl_target=args.cfl)
-        dt = min(dt, args.t_end - solver.t)
+    with _monitor_y_velocity_squared(args, solver, is_root) as monitor_y:
+        monitor_y()
+        while solver.t < args.t_end - 1e-12:
+            dt = solver.suggest_dt(cfl_target=args.cfl)
+            dt = min(dt, args.t_end - solver.t)
 
-        solver.step(dt)
-        step_count += 1
+            solver.step(dt)
+            step_count += 1
+            velocity_y_squared = monitor_y()
 
-        # ---- diagnostics ----
-        if is_root and args.verbose and step_count % 50 == 0:
-            div_max = np.max(np.abs(solver.divergence()))
-            cfl_val = solver.cfl(dt)
-            print(f"  t={solver.t:8.4f}  dt={dt:.2e}  "
-                  f"|div u|_max={div_max:.2e}  CFL={cfl_val:.3f}")
+            # ---- diagnostics ----
+            if is_root and args.verbose and step_count % 50 == 0:
+                div_max = np.max(np.abs(solver.divergence()))
+                cfl_val = solver.cfl(dt)
+                power_proxy = ("" if velocity_y_squared is None else
+                               f"  y_dot^2={velocity_y_squared:.6e}")
+                print(f"  t={solver.t:8.4f}  dt={dt:.2e}  "
+                      f"|div u|_max={div_max:.2e}  CFL={cfl_val:.3f}{power_proxy}")
 
-        # ---- save snapshot ----
-        if solver.t >= t_save_next - 1e-12:
-            if is_root:
-                snap_path = os.path.join(
-                    args.outdir, f"snap_{solver.t:08.4f}.npz")
-                save_snapshot(snap_path, solver.u, solver.v, solver.p,
-                              solver.t,
-                              meta=_snapshot_metadata(args, solver),
-                              extra=_snapshot_extra_fields(solver),
-                              fmt="numpy")
-            t_save_next += args.save_dt
+            # ---- save snapshot ----
+            if solver.t >= t_save_next - 1e-12:
+                if is_root:
+                    snap_path = os.path.join(
+                        args.outdir, f"snap_{solver.t:08.4f}.npz")
+                    save_snapshot(snap_path, solver.u, solver.v, solver.p,
+                                  solver.t,
+                                  meta=_snapshot_metadata(args, solver),
+                                  extra=_snapshot_extra_fields(solver),
+                                  fmt="numpy")
+                t_save_next += args.save_dt
 
     if is_root and args.verbose:
         print(f"\n  Done.  t_final={solver.t:.4f},  steps={step_count}")
