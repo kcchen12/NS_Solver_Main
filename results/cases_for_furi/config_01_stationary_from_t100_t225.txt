@@ -1,4 +1,4 @@
-# Shared stationary spin-up for all Re=100 production cases.
+# Stationary cylinder production run from the shared t=100 spin-up state.
 
 nx = 640
 ny = 1280
@@ -20,7 +20,7 @@ bc_top = farfield
 
 inflow_u = 1.0
 inflow_v = 0.0
-initial_v_perturbation_percent = 2.0
+initial_v_perturbation_percent = 0.0
 inflow_w = 0.0
 farfield_mode = neumann
 
@@ -31,11 +31,11 @@ wall_normal_velocity = 0.0
 outflow_mode = convective
 outflow_speed = 1.0
 
-t_end = 101.0
+t_end = 225.0
 cfl = 0.25
 save_dt = 0.1
-outdir = cases/cases_for_furi/output/00_stationary_spinup_t0_t100
-resume_from =
+outdir = results/cases_for_furi/output/01_stationary_from_t100_t225
+resume_from = results/cases_for_furi/output/00_stationary_spinup_t0_t100/snap_100.9001.npz
 resume_latest = false
 
 uniform_grid = false

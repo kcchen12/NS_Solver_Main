@@ -487,6 +487,7 @@ class TestAnalyzeAerodynamicsHelpers:
             save_series=None,
             save_drag_decomposition=str(decomp_path),
             save_report=str(report_path),
+            include_harvested_power=True,
             force_source="surface-full",
             drop_final_sample=False,
         )
@@ -506,6 +507,8 @@ class TestAnalyzeAerodynamicsHelpers:
         assert "Drag ratio" in report
         assert "C_d,p/C_d,v" in report
         assert "pressure fraction" in report
+        assert "HARVESTED MECHANICAL POWER AND ENERGY" in report
+        assert "Unavailable" in report  # This fixture has no damper metadata.
 
     def test_plot_drag_decomposition_writes_png(self, tmp_path):
         results_dir = tmp_path / "results"

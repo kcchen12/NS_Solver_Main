@@ -1116,8 +1116,8 @@ class ImmersedBoundary:
         mask_u, mask_v = self._free_body_masks(spec)
         spec.mask_u = mask_u
         spec.mask_v = mask_v
-        self.mask_u = self._base_mask_u | mask_u
-        self.mask_v = self._base_mask_v | mask_v
+        self.mask_u |= mask_u
+        self.mask_v |= mask_v
         self.free_y_circles.append(spec)
 
     def add_rectangle(self, x0: float, x1: float,
@@ -1255,10 +1255,16 @@ class ImmersedBoundary:
         metadata: dict,
         time: float = 0.0,
     ) -> bool:
-        """Restore the first free-body cylinder state from snapshot metadata."""
-        if not self.free_y_circles:
+        """Restore the primary free body from snapshot metadata."""
+        return self.restore_free_y_circle_state(0, metadata, time=time)
+
+    def restore_free_y_circle_state(
+        self, index: int, metadata: dict, time: float = 0.0,
+    ) -> bool:
+        """Restore one free body using its individual snapshot metadata."""
+        if index >= len(self.free_y_circles):
             return False
-        spec = self.free_y_circles[0]
+        spec = self.free_y_circles[index]
 
         def _optional_float(key: str) -> float | None:
             if key not in metadata:
@@ -1283,13 +1289,15 @@ class ImmersedBoundary:
         elif displacement_y is not None:
             spec.y = float(spec.cy0 + displacement_y)
 
+        force_x_key = "cylinder_free_force_x" if "cylinder_free_force_x" in metadata else "ibm_force_x"
+        force_y_key = "cylinder_free_force_y" if "cylinder_free_force_y" in metadata else "ibm_force_y"
         for metadata_key, attr_name in (
             ("cylinder_free_x_velocity", "velocity_x"),
             ("cylinder_free_y_velocity", "velocity_y"),
             ("cylinder_free_theta_angle", "angle"),
             ("cylinder_free_theta_angular_velocity", "angular_velocity"),
-            ("ibm_force_x", "last_force_x"),
-            ("ibm_force_y", "last_force_y"),
+            (force_x_key, "last_force_x"),
+            (force_y_key, "last_force_y"),
             ("ibm_moment_z", "last_moment_z"),
         ):
             value = _optional_float(metadata_key)
@@ -1302,9 +1310,13 @@ class ImmersedBoundary:
         return True
 
     def first_free_y_circle_state(self, time: float = 0.0) -> dict | None:
-        if not self.free_y_circles:
+        return self.free_y_circle_state(0, time=time)
+
+    def free_y_circle_state(self, index: int, time: float = 0.0) -> dict | None:
+        """Return an individual free body's state without combining body loads."""
+        if index >= len(self.free_y_circles):
             return None
-        spec = self.free_y_circles[0]
+        spec = self.free_y_circles[index]
         return {
             "center_x": float(spec.x),
             "center_y": float(spec.y),

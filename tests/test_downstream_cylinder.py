@@ -77,10 +77,16 @@ def test_tandem_solver_enforces_both_bodies_and_saves_geometry(tmp_path, monkeyp
     grid = solver.grid
     rear_u = (grid.xf[:, None] - 4.4)**2 + (grid.yc[None, :] - 2.0)**2 < 0.4**2
     rear_v = (grid.xc[:, None] - 4.4)**2 + (grid.yf[None, :] - 2.0)**2 < 0.4**2
+    if motion == "free-y":
+        # Free bodies use a smoothed IBM interface; enforce exact velocity in the core.
+        weight_u, weight_v = solver.ibm._free_body_force_weights(solver.ibm.free_y_circles[1])
+        rear_u = weight_u >= 1.0 - 1e-12
+        rear_v = weight_v >= 1.0 - 1e-12
     assert np.any(rear_u) and np.any(rear_v)
     assert np.all(solver.ibm.mask_u[rear_u]) and np.all(solver.ibm.mask_v[rear_v])
     np.testing.assert_allclose(solver.u[rear_u], 0.0, atol=1e-12)
-    np.testing.assert_allclose(solver.v[rear_v], 0.0, atol=1e-12)
+    rear_velocity = (solver.ibm.free_y_circles[1].velocity_y if motion == "free-y" else 0.0)
+    np.testing.assert_allclose(solver.v[rear_v], rear_velocity, atol=1e-12)
     assert np.all(np.isfinite(solver.u)) and np.all(np.isfinite(solver.p))
     if motion == "stationary":
         primary_u = (grid.xf[:, None] - 2.0)**2 + (grid.yc[None, :] - 2.0)**2 < 0.4**2
@@ -174,3 +180,75 @@ def test_velocity_squared_monitor_ignored_without_free_y(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "_run_auto_outputs", lambda grid, args: None)
     main.run(args)
     assert not (tmp_path / "output" / "y_velocity_squared.csv").exists()
+
+
+@pytest.mark.parametrize("monitor,primary_monitor", [(False, False), (True, True), (True, False)])
+def test_both_cylinders_oscillate_independently_of_power_monitor(
+        tmp_path, monkeypatch, monitor, primary_monitor):
+    args = parse_case(tmp_path, monkeypatch, extra=[
+        "--cylinder-free-y-dof", "true",
+        "--cylinder-free-y-initial-velocity", "-0.12",
+        "--cylinder-free-y-monitor-velocity-squared", str(primary_monitor),
+        "--cylinder-downstream-monitor-velocity-squared", str(monitor),
+    ])
+    args.t_end = 0.01
+    monkeypatch.setattr(main, "_run_auto_outputs", lambda grid, args: None)
+    monkeypatch.setattr(main.FractionalStepSolver, "suggest_dt", lambda *a, **k: 0.001)
+    solver = main.run(args)
+    front, rear = solver.ibm.free_y_circles
+    assert front.y != front.cy0 and rear.y != rear.cy0
+    assert rear.x == pytest.approx(4.4)
+    assert front.last_force_y != pytest.approx(rear.last_force_y)
+    assert front.velocity_y != pytest.approx(rear.velocity_y)
+    history_path = tmp_path / "output" / "tandem_y_velocity_squared.csv"
+    assert history_path.exists() is monitor
+    assert (tmp_path / "output" / "y_velocity_squared.csv").exists() is primary_monitor
+    if monitor:
+        history = np.loadtxt(history_path, delimiter=",", skiprows=1)
+        assert history.shape == (11, 6)
+        np.testing.assert_allclose(history[:, 2], history[:, 1] ** 2)
+        np.testing.assert_allclose(history[:, 4], history[:, 3] ** 2)
+        np.testing.assert_allclose(history[:, 5], history[:, 2] + history[:, 4])
+        assert history[-1, 1] == pytest.approx(front.velocity_y)
+        assert history[-1, 3] == pytest.approx(rear.velocity_y)
+        assert (tmp_path / "output" / "tandem_y_velocity_squared.png").stat().st_size > 1000
+
+    snapshot = sorted((tmp_path / "output").glob("snap_*.npz"))[-1]
+    *_, metadata = load_snapshot(str(snapshot), fmt="numpy")
+    assert metadata["cylinder_downstream_center_y"] == pytest.approx(rear.y)
+    assert metadata["cylinder_downstream_velocity_y"] == pytest.approx(rear.velocity_y)
+    assert _load_downstream_cylinder_overlay_geometry_for_snapshot(str(snapshot)) == pytest.approx(
+        (rear.x, rear.y, rear.radius))
+    args.resume_from = str(snapshot)
+    args.t_end = 0.012
+    states_before_step = []
+    original_step = main.FractionalStepSolver.step
+
+    def inspect_restore(resumed_solver, dt):
+        if not states_before_step:
+            states_before_step.extend([
+                (spec.y, spec.velocity_y, spec.last_force_y)
+                for spec in resumed_solver.ibm.free_y_circles])
+        return original_step(resumed_solver, dt)
+
+    monkeypatch.setattr(main.FractionalStepSolver, "step", inspect_restore)
+    main.run(args)
+    np.testing.assert_allclose(states_before_step, [
+        (spec.y, spec.velocity_y, spec.last_force_y) for spec in (front, rear)])
+
+
+def test_adding_second_free_cylinder_keeps_primary_mask():
+    grid = CartesianGrid(48, 32, lx=8.0, ly=4.0)
+    ibm = ImmersedBoundary(grid)
+    ibm.add_free_y_circle(2.0, 2.0, 0.4)
+    primary_mask = ibm.mask_u.copy()
+    ibm.add_free_y_circle(4.4, 2.0, 0.4)
+    assert np.all(ibm.mask_u[primary_mask])
+
+
+@pytest.mark.parametrize("master", [False, True])
+def test_tandem_monitor_experimental_gate(tmp_path, monkeypatch, master):
+    parse_case(tmp_path, monkeypatch, master=master)
+    with (tmp_path / "experimental_config.txt").open("a") as stream:
+        stream.write("cylinder_downstream_monitor_velocity_squared = true\n")
+    assert main.parse_args().cylinder_downstream_monitor_velocity_squared is master

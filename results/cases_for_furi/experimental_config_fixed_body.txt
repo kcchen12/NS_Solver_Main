@@ -3,9 +3,10 @@ enable_experimental_config = false
 
 truncate_y_cells = 0
 
-# Optional stationary downstream cylinder; center-to-center L/D, same diameter.
+# Optional downstream cylinder; free-y applies to both; center-to-center L/D.
 cylinder_downstream = false
 cylinder_downstream_spacing_ratio = 3.0
+cylinder_downstream_monitor_velocity_squared = false
 
 cylinder_free_x_dof = false
 cylinder_free_x_mass = 100.0

@@ -8,3 +8,16 @@ results/
 **/__pycache__/
 *.pyc
 NS_Solver/
+
+# Keep relocated Furi case sources trackable while ignoring generated run data.
+!/results/
+/results/*
+!/results/cases_for_furi/
+/results/cases_for_furi/*
+!/results/cases_for_furi/*.txt
+!/results/cases_for_furi/*.md
+!/results/cases_for_furi/*.ps1
+!/results/cases_for_furi/*.py
+
+# Generated spacing-sweep logs, snapshots, and per-run reports.
+/cases/tandem_spacing_256x512/runs/

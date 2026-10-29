@@ -519,7 +519,7 @@ def parse_args():
                    default=_experimental_default(
                        exp_cfg, experimental_config_enabled,
                        "cylinder_downstream", False, bool),
-                   help="Experimental option: add a stationary equal-diameter downstream cylinder")
+                   help="Add an equal-diameter downstream cylinder; free-y motion applies to both bodies")
     p.add_argument("--cylinder-downstream-spacing-ratio", type=float,
                    default=_experimental_default(
                        exp_cfg, experimental_config_enabled,
@@ -537,6 +537,11 @@ def parse_args():
                        "Experimental option: request one-degree-of-freedom "
                        "transverse cylinder motion for VIV studies"
                    ))
+    p.add_argument("--cylinder-downstream-monitor-velocity-squared", type=str_to_bool,
+                   default=_experimental_default(
+                       exp_cfg, experimental_config_enabled,
+                       "cylinder_downstream_monitor_velocity_squared", False, bool),
+                   help="Record and plot both tandem cylinders' Y velocity squared and their sum")
     p.add_argument("--cylinder-free-y-monitor-velocity-squared", type=str_to_bool,
                    default=_experimental_default(
                        exp_cfg, experimental_config_enabled,
@@ -1021,6 +1026,9 @@ def parse_args():
                    default=post_cfg.get(
                        "auto_generate_aero_report", False, bool),
                    help="Automatically save the aerodynamic report after the run")
+    p.add_argument("--auto-include-harvested-power", type=str_to_bool,
+                   default=post_cfg.get("auto_include_harvested_power", False, bool),
+                   help="Include free-Y damper power and integrated energy in the aerodynamic report")
     p.add_argument("--auto-generate-shedding-spectrum", type=str_to_bool,
                    default=post_cfg.get(
                        "auto_generate_shedding_spectrum", False, bool),
@@ -1487,6 +1495,7 @@ def _plot_ibm_outline(
     linewidth: float = 1.6,
     time: float = 0.0,
     center_override: tuple[float, float] | None = None,
+    downstream_center_override: tuple[float, float] | None = None,
 ) -> None:
     cx, cy, radius = _cylinder_center_at_time(args, time)
     if center_override is not None:
@@ -1496,6 +1505,8 @@ def _plot_ibm_outline(
     downstream = _resolve_downstream_cylinder_geometry(args)
     if downstream is not None:
         rear_x, rear_y, rear_radius = downstream
+        if downstream_center_override is not None:
+            rear_x, rear_y = downstream_center_override
         ax.plot(rear_x + rear_radius * np.cos(theta),
                 rear_y + rear_radius * np.sin(theta),
                 color=color, linewidth=linewidth, zorder=6)
@@ -1663,6 +1674,8 @@ def _snapshot_metadata(args, solver) -> dict:
                 metadata["cylinder_free_theta_angle_deg"] = np.rad2deg(free_state["angle"])
                 metadata["cylinder_free_theta_angular_velocity"] = free_state["angular_velocity"]
                 metadata["ibm_moment_z"] = free_state["last_moment_z"]
+                metadata["cylinder_free_force_x"] = free_state["last_force_x"]
+                metadata["cylinder_free_force_y"] = free_state["last_force_y"]
         metadata["cylinder_center_x"] = cx
         metadata["cylinder_center_y"] = cy
         metadata["cylinder_radius"] = radius
@@ -1670,6 +1683,11 @@ def _snapshot_metadata(args, solver) -> dict:
     metadata["cylinder_downstream_enabled"] = downstream is not None
     if downstream is not None:
         rear_x, rear_y, rear_radius = downstream
+        rear_state = solver.ibm.free_y_circle_state(1, time=solver.t) if args.cylinder_free_y_dof else None
+        if rear_state is not None:
+            rear_x, rear_y = rear_state["center_x"], rear_state["center_y"]
+            for key in ("velocity_y", "last_force_x", "last_force_y"):
+                metadata[f"cylinder_downstream_{key}"] = rear_state[key]
         metadata.update({
             "cylinder_downstream_center_x": rear_x,
             "cylinder_downstream_center_y": rear_y,
@@ -1845,24 +1863,38 @@ def get_runtime_grid(args):
 
 
 @contextmanager
-def _monitor_y_velocity_squared(args, solver, is_root):
-    """Stream primary-body y velocity squared to disk at every solver step."""
+def _monitor_y_velocity_squared(args, solver, is_root, tandem=False):
+    """Stream individual Y power proxies, optionally including the tandem sum."""
+    option = ("cylinder_downstream_monitor_velocity_squared" if tandem
+              else "cylinder_free_y_monitor_velocity_squared")
     if not (is_root and args.cylinder and args.cylinder_free_y_dof
-            and getattr(args, "cylinder_free_y_monitor_velocity_squared", False)):
+            and getattr(args, option, False)
+            and (not tandem or args.cylinder_downstream)):
         yield lambda: None
         return
 
-    path = os.path.join(args.outdir, "y_velocity_squared.csv")
+    basename = "tandem_y_velocity_squared" if tandem else "y_velocity_squared"
+    path = os.path.join(args.outdir, basename + ".csv")
     with open(path, "w", newline="", encoding="utf-8") as stream:
         writer = csv.writer(stream)
-        writer.writerow(["t", "velocity_y", "velocity_y_squared"])
+        writer.writerow((["t", "primary_velocity_y", "primary_velocity_y_squared",
+                          "downstream_velocity_y", "downstream_velocity_y_squared",
+                          "total_velocity_y_squared"] if tandem else
+                         ["t", "velocity_y", "velocity_y_squared"]))
 
         def record():
             state = solver.ibm.first_free_y_circle_state(time=solver.t)
             velocity = float(state["velocity_y"])
-            writer.writerow([solver.t, velocity, velocity ** 2])
+            row = [solver.t, velocity, velocity ** 2]
+            total = velocity ** 2
+            if tandem:
+                rear = solver.ibm.free_y_circle_state(1, time=solver.t)
+                rear_velocity = float(rear["velocity_y"])
+                total += rear_velocity ** 2
+                row.extend([rear_velocity, rear_velocity ** 2, total])
+            writer.writerow(row)
             stream.flush()
-            return velocity ** 2
+            return total
 
         yield record
 
@@ -1875,12 +1907,16 @@ def _monitor_y_velocity_squared(args, solver, is_root):
         return
     data = np.loadtxt(path, delimiter=",", skiprows=1, ndmin=2)
     fig, ax = plt.subplots(figsize=(9, 4))
-    ax.plot(data[:, 0], data[:, 2])
+    ax.plot(data[:, 0], data[:, 2], label="Primary")
+    if tandem:
+        ax.plot(data[:, 0], data[:, 4], label="Downstream")
+        ax.plot(data[:, 0], data[:, 5], label="Total", linestyle="--")
+        ax.legend()
     ax.set(xlabel="Simulation time", ylabel=r"$\dot{y}^{2}$",
            title="Y velocity squared (mechanical power proxy)")
     ax.grid(True, alpha=0.25)
     fig.tight_layout()
-    plot_path = os.path.join(args.outdir, "y_velocity_squared.png")
+    plot_path = os.path.join(args.outdir, basename + ".png")
     fig.savefig(plot_path, dpi=150)
     plt.close(fig)
     print(f"  Y velocity squared saved to {path} and {plot_path}")
@@ -2247,11 +2283,23 @@ def run(args, grid=None, grid_loaded_from_file=False):
                 )
 
     # ------------------------------------------------------------------
-    # The downstream cylinder is fixed in space, including when the primary moves.
-    # add_circle contributes to the base masks retained by dynamic IBM updates.
+    # Both cylinders have independent Y oscillators when free Y motion is enabled.
     downstream = _resolve_downstream_cylinder_geometry(args)
     if downstream is not None:
-        ibm.add_circle(*downstream)
+        if args.cylinder_free_y_dof:
+            ibm.add_free_y_circle(
+                *downstream,
+                mass=args.cylinder_free_y_mass,
+                damping=args.cylinder_free_y_damping,
+                stiffness=args.cylinder_free_y_stiffness,
+                initial_velocity_y=args.cylinder_free_y_initial_velocity,
+                release_time_y=args.cylinder_free_y_release_time,
+                force_relaxation=args.cylinder_free_y_force_relaxation,
+                max_displacement=0.01 * args.cylinder_free_y_max_displacement_percent * 2.0 * r,
+                max_speed=args.cylinder_free_y_max_speed,
+            )
+        else:
+            ibm.add_circle(*downstream)
         if is_root and args.verbose:
             print(f"  Downstream cyl.: center=({downstream[0]:.4g}, {downstream[1]:.4g}), "
                   f"radius={downstream[2]:.4g}, L/D={args.cylinder_downstream_spacing_ratio:.4g}")
@@ -2314,6 +2362,18 @@ def run(args, grid=None, grid_loaded_from_file=False):
                 resume_metadata,
                 time=solver.t,
             )
+            if args.cylinder_downstream and args.cylinder_free_y_dof:
+                rear_metadata = {
+                    target: resume_metadata[source]
+                    for source, target in (
+                        ("cylinder_downstream_center_x", "cylinder_center_x"),
+                        ("cylinder_downstream_center_y", "cylinder_center_y"),
+                        ("cylinder_downstream_velocity_y", "cylinder_free_y_velocity"),
+                        ("cylinder_downstream_last_force_x", "cylinder_free_force_x"),
+                        ("cylinder_downstream_last_force_y", "cylinder_free_force_y"),
+                    ) if source in resume_metadata
+                }
+                solver.ibm.restore_free_y_circle_state(1, rear_metadata, time=solver.t)
         if solver.t >= args.t_end - 1e-12:
             raise ValueError(
                 f"Resume snapshot t={solver.t:.4f} is already at/after "
@@ -2342,8 +2402,10 @@ def run(args, grid=None, grid_loaded_from_file=False):
     if is_root and args.verbose:
         print(f"\n  Starting time loop …")
 
-    with _monitor_y_velocity_squared(args, solver, is_root) as monitor_y:
+    with (_monitor_y_velocity_squared(args, solver, is_root) as monitor_y,
+          _monitor_y_velocity_squared(args, solver, is_root, tandem=True) as monitor_tandem):
         monitor_y()
+        monitor_tandem()
         while solver.t < args.t_end - 1e-12:
             dt = solver.suggest_dt(cfl_target=args.cfl)
             dt = min(dt, args.t_end - solver.t)
@@ -2351,6 +2413,7 @@ def run(args, grid=None, grid_loaded_from_file=False):
             solver.step(dt)
             step_count += 1
             velocity_y_squared = monitor_y()
+            tandem_velocity_squared = monitor_tandem()
 
             # ---- diagnostics ----
             if is_root and args.verbose and step_count % 50 == 0:
@@ -2358,6 +2421,8 @@ def run(args, grid=None, grid_loaded_from_file=False):
                 cfl_val = solver.cfl(dt)
                 power_proxy = ("" if velocity_y_squared is None else
                                f"  y_dot^2={velocity_y_squared:.6e}")
+                if tandem_velocity_squared is not None:
+                    power_proxy += f"  tandem_sum_y_dot^2={tandem_velocity_squared:.2g}"
                 print(f"  t={solver.t:8.4f}  dt={dt:.2e}  "
                       f"|div u|_max={div_max:.2e}  CFL={cfl_val:.3f}{power_proxy}")
 
@@ -2421,6 +2486,7 @@ def _plot_results(solver, grid, args):
         # Draw the immersed cylinder on every panel so geometry alignment
         # is visible in vorticity, pressure, and velocity plots.
         center_override = None
+        downstream_center_override = None
         if (
             args.cylinder_free_x_dof
             or args.cylinder_free_y_dof
@@ -2432,6 +2498,9 @@ def _plot_results(solver, grid, args):
                     free_state["center_x"],
                     free_state["center_y"],
                 )
+            if args.cylinder_downstream and args.cylinder_free_y_dof:
+                rear_state = solver.ibm.free_y_circle_state(1, time=solver.t)
+                downstream_center_override = (rear_state["center_x"], rear_state["center_y"])
         for ax in axes:
             _plot_ibm_outline(
                 ax,
@@ -2440,6 +2509,7 @@ def _plot_results(solver, grid, args):
                 linewidth=1.6,
                 time=solver.t,
                 center_override=center_override,
+                downstream_center_override=downstream_center_override,
             )
 
     # Vorticity: use robust clipping + high-contrast diverging map
@@ -2671,6 +2741,7 @@ def _run_auto_outputs(grid, args):
                 force_source="surface-full",
                 surface_sample_offset_factor=args.surface_sample_offset_factor,
                 stats_t_min=args.auto_aero_stats_t_min,
+                include_harvested_power=getattr(args, "auto_include_harvested_power", False),
             )
             aero_ready = status == 0 and os.path.exists(aero_series_path)
             if status != 0:

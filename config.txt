@@ -3,8 +3,8 @@
 # Format: key = value
 
 # Grid parameters
-nx = 128
-ny = 256
+nx = 256
+ny = 512
 
 # Domain dimensions
 lx = 25.0

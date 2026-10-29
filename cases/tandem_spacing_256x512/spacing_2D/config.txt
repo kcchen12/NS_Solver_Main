@@ -1,0 +1,103 @@
+# NS_Solver Configuration File
+# All lines starting with '#' are comments
+# Format: key = value
+
+# Grid parameters
+nx = 256
+ny = 512
+
+# Domain dimensions
+lx = 25.0
+ly = 10.0
+# Optional explicit domain bounds (if omitted, solver uses x:[0,lx], y:[0,ly])
+x_min = -10.0
+x_max = 30.0
+y_min = -20.0
+y_max = 20.0
+
+# Physics parameters
+re = 100.0
+
+# Boundary conditions
+# Face types: inflow | farfield | outflow | wall | periodic
+bc_left = inflow
+bc_right = outflow
+bc_bottom = farfield
+bc_top = farfield
+
+# Inflow/farfield velocity components
+inflow_u = 1.0
+inflow_v = 0.0
+initial_v_perturbation_percent = 2.0
+inflow_w = 0.0
+# Farfield behavior (used where face type is 'farfield')
+# farfield_mode: dirichlet | neumann
+farfield_mode = neumann
+
+# Wall behavior (used where face type is 'wall')
+# wall_slip_mode: no-slip | free-slip
+wall_slip_mode = no-slip
+# If true, allows non-zero normal velocity at wall boundaries
+wall_penetration = false
+wall_normal_velocity = 0.0
+
+# Outflow behavior (used where face type is 'outflow')
+# outflow_mode: convective | zero-gradient
+outflow_mode = convective
+outflow_speed = 1.0
+
+# Time integration
+t_end = 100.0
+cfl = 0.25
+
+# I/O parameters
+save_dt = 0.1
+outdir = output
+# Grid generation (used by both main.py and pre_generate_grid.py)
+uniform_grid = false
+# Nonuniform grids use a uniform central core with tanh-stretched outer regions.
+# Set <=0 in a direction to make that direction uniform.
+grid_beta_x = 2.0
+grid_beta_y = 2.0
+
+grid_uniform_x_start = -2.0
+grid_uniform_x_end = 12.0
+grid_uniform_y_start = -4.0
+grid_uniform_y_end = 4.0
+
+# Features (true/false)
+cylinder = true
+verbose = true
+
+# Cylinder
+cylinder_center_x = 0.0
+cylinder_center_y = 0.0
+# Cylinder radius in physical units (set > 0 to override default ly/8)
+cylinder_radius = 0.5
+# If true, re is interpreted as Re_D based on cylinder diameter
+re_is_cylinder_based = true
+
+# Cylinder rotation
+#   stationary  -> fixed_cylinder
+#   constant    -> one-direction constant angular velocity
+#   oscillatory -> back-and-forth sinusoidal angular velocity
+cylinder_rotation_mode = fixed_cylinder
+# omega(t) = amplitude  for constant
+# omega(t) = amplitude * sin(2*pi*frequency*t + phase) for oscillatory
+cylinder_rotation_amplitude = 0.4
+cylinder_rotation_frequency = 0.081
+cylinder_rotation_phase_deg = 0.0
+
+# Cylinder translation (non-rotating moving cylinder)
+#   stationary     -> fixed center
+#   oscillatory-x  -> left/right sinusoidal center motion
+#   oscillatory-y  -> up/down sinusoidal center motion
+#   oscillatory-xy -> left/right and up/down sinusoidal center motion
+# Amplitudes are percentages of cylinder diameter; 10% keeps a small sweep
+# inside the concentrated mesh when the uniform core is sized around the body.
+cylinder_translation_mode = stationary
+cylinder_translation_amplitude_percent = 10.0
+cylinder_translation_x_percent = 10.0
+cylinder_translation_y_percent = 10.0
+cylinder_translation_frequency = 0.081
+cylinder_translation_phase_deg = 0.0

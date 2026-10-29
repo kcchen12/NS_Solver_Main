@@ -1606,6 +1606,8 @@ def parse_args() -> argparse.Namespace:
                             DEFAULT_RESULTS_DIR, "aero_report.txt"),
                         help="TXT path for comprehensive report (default: results/aero_report.txt)")
 
+    parser.add_argument("--include-harvested-power", action="store_true",
+                        help="Include free-Y damper power and integrated energy in the report")
     return parser.parse_args()
 
 
@@ -1630,6 +1632,7 @@ def run_analysis(
     drop_final_sample: bool = True,
     surface_sample_offset_factor: float = 0.5,
     stats_t_min: Optional[float] = None,
+    include_harvested_power: bool = False,
 ) -> int:
     """Run aerodynamic post-processing programmatically."""
     global _LAST_SURFACE_DIAGNOSTICS
@@ -2070,6 +2073,10 @@ def run_analysis(
                 f"Settled stats     : unavailable for t >= {settled_stats_start:.6g}"
             )
 
+        if include_harvested_power:
+            from src.harvested_power import harvested_power_report_lines
+            lines.extend(harvested_power_report_lines(indir, pattern))
+
         with open(save_report, "w", encoding="utf-8") as fout:
             fout.write("\n".join(lines) + "\n")
 
@@ -2100,6 +2107,7 @@ def main() -> int:
         drop_final_sample=not args.keep_final_sample,
         surface_sample_offset_factor=args.surface_sample_offset_factor,
         stats_t_min=args.stats_t_min,
+        include_harvested_power=args.include_harvested_power,
     )
 
 

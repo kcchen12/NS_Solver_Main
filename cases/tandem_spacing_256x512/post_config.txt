@@ -1,0 +1,48 @@
+# NS_Solver Post-Processing Configuration File
+# Controls optional generated artifacts after a run.
+
+# Grid visualization
+plot = true
+auto_generate_grid_spacing = false
+auto_generate_ibm_forcing = false
+auto_generate_vorticity_video = true
+auto_vorticity_video_frame_stride = 5
+draw_cylinder_overlay = false
+
+# Aerodynamic outputs
+auto_generate_coeff_history = true
+auto_generate_aero_report = true
+# Include free-Y mean/peak power and integrated energy (both cylinders + total).
+auto_include_harvested_power = true
+auto_generate_shedding_spectrum = true
+auto_generate_y_oscillation_strouhal = false
+auto_generate_drag_decomposition = true
+auto_generate_drag_decomposition_plot = true
+auto_generate_pressure_coefficient_theta = false
+auto_generate_time_averaged_fields = false
+
+# Restart interpolation
+auto_generate_restart_interpolation = false
+restart_interpolation_method = linear
+# Use 0 to default to twice the runtime grid resolution.
+restart_interpolation_nx = 0
+restart_interpolation_ny = 0
+restart_interpolation_outdir = restart_output
+restart_interpolation_filename = restart_fine.npz
+restart_interpolation_write_grid = true
+
+# Surface-force contour offset in local near-cylinder grid spacings.
+# Used by automatic aerodynamic reports/coefficient histories when integrating
+# pressure + viscous surface stress from snapshots. Smaller samples closer to
+# the IBM boundary; 0.5 improved stationary Re=100 lift/drag.
+surface_force_sample_offset_factor = 0.5
+
+# Time trimming for post-processing
+auto_coeff_t_min = 0.0
+auto_aero_t_min = 0.0
+auto_shedding_spectrum_t_min = 0.0
+# Values between 0 and 1 mean a fraction of the saved run; 0.70 uses the last 30%.
+auto_aero_stats_t_min = 0.0
+# Fourier taper: none, hann (also called hanning). Average this many segments.
+auto_shedding_spectrum_window = hann
+auto_shedding_spectrum_num_windows = 4

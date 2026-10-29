@@ -9,10 +9,12 @@ enable_experimental_config = false
 truncate_y_cells = 0
 
 # Cylinder experiment controls
-# Optional stationary cylinder behind the original one, along +x.
+# Optional cylinder behind the original one, along +x; free-y applies to both.
 # Same diameter D; L is center-to-center distance, so surface gap is (L/D - 1)*D.
 cylinder_downstream = false
 cylinder_downstream_spacing_ratio = 3.0
+# Monitor both cylinders' y-dot squared and their sum independently of motion.
+cylinder_downstream_monitor_velocity_squared = false
 
 # If true, request spring-mass-damper bluff-body degrees of freedom.
 # free-x allows streamwise motion; free-y allows transverse motion.

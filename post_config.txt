@@ -12,8 +12,10 @@ draw_cylinder_overlay = false
 # Aerodynamic outputs
 auto_generate_coeff_history = true
 auto_generate_aero_report = true
+# Include free-Y mean/peak power and integrated energy (both cylinders + total).
+auto_include_harvested_power = true
 auto_generate_shedding_spectrum = true
-auto_generate_y_oscillation_strouhal = true
+auto_generate_y_oscillation_strouhal = false
 auto_generate_drag_decomposition = true
 auto_generate_drag_decomposition_plot = true
 auto_generate_pressure_coefficient_theta = false
@@ -36,11 +38,11 @@ restart_interpolation_write_grid = true
 surface_force_sample_offset_factor = 0.5
 
 # Time trimming for post-processing
-auto_coeff_t_min = 100.0
-auto_aero_t_min = 100.0
-auto_shedding_spectrum_t_min = 100.0
+auto_coeff_t_min = 0.0
+auto_aero_t_min = 0.0
+auto_shedding_spectrum_t_min = 0.0
+# Values between 0 and 1 mean a fraction of the saved run; 0.70 uses the last 30%.
+auto_aero_stats_t_min = 0.0
 # Fourier taper: none, hann (also called hanning). Average this many segments.
 auto_shedding_spectrum_window = hann
 auto_shedding_spectrum_num_windows = 4
-# Values between 0 and 1 mean a fraction of the saved run; 0.70 uses the last 30%.
-auto_aero_stats_t_min = 100.0

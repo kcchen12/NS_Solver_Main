@@ -124,7 +124,7 @@ def _load_cylinder_overlay_geometry_for_snapshot(
 def _load_downstream_cylinder_overlay_geometry_for_snapshot(
     file_path: str,
 ) -> tuple[float, float, float] | None:
-    """Read the fixed downstream cylinder from runtime snapshot metadata."""
+    """Read the downstream cylinder's current geometry from snapshot metadata."""
     try:
         with np.load(file_path) as data:
             if not bool(np.asarray(data.get("meta_cylinder_downstream_enabled", False)).item()):
@@ -570,6 +570,7 @@ def plot_vorticity_video(
 
     frames: list[np.ndarray] = []
     times: list[float] = []
+    frame_geometries = []
     skipped: list[str] = []
     xc = yc = None
     xf = yf = None
@@ -583,12 +584,21 @@ def plot_vorticity_video(
                 xf_i, yf_i = _load_grid_faces_for_snapshot(path, nx=nx, ny=ny)
                 xf = np.asarray(xf_i, dtype=float)
                 yf = np.asarray(yf_i, dtype=float)
+            with np.load(path, allow_pickle=False) as data:
+                frame_time = float(data["t"]) if "t" in data else float(len(times))
+            geometry = None
+            if draw_cylinder_overlay:
+                geometry = (
+                    _load_cylinder_overlay_geometry_for_snapshot(path, config_path=config_path),
+                    _load_downstream_cylinder_overlay_geometry_for_snapshot(path),
+                )
             frames.append(omega)
+            times.append(frame_time)
             xc = xc_i
             yc = yc_i
             max_abs_omega = max(max_abs_omega, float(np.max(np.abs(omega))))
-            with np.load(path, allow_pickle=False) as data:
-                times.append(float(data["t"]) if "t" in data else float(len(times)))
+            if draw_cylinder_overlay:
+                frame_geometries.append(geometry)
             if verbose and (idx == 1 or idx == total_frames or idx % progress_interval == 0):
                 print(f"    Loaded vorticity frame {idx}/{total_frames}")
         except Exception:
@@ -625,20 +635,11 @@ def plot_vorticity_video(
     ax.set_aspect("equal")
     ax.set_xlim(-5.0, 15.0)
     ax.set_ylim(-5.0, 5.0)
-    circle_geometry = None
-    if draw_cylinder_overlay:
-        circle_geometry = _load_cylinder_overlay_geometry_for_snapshot(
-            paths[0],
-            config_path=config_path,
-        )
-    overlay_geometries = [circle_geometry] if circle_geometry is not None else []
-    if draw_cylinder_overlay:
-        downstream_geometry = _load_downstream_cylinder_overlay_geometry_for_snapshot(paths[0])
-        if downstream_geometry is not None:
-            overlay_geometries.append(downstream_geometry)
-    for cx, cy, radius in overlay_geometries:
-        ax.add_patch(
-            Circle(
+    overlay_patches = []
+    for body_index, geometry in enumerate(frame_geometries[0] if frame_geometries else []):
+        if geometry is not None:
+            cx, cy, radius = geometry
+            patch = Circle(
                 (cx, cy),
                 radius,
                 fill=False,
@@ -646,12 +647,19 @@ def plot_vorticity_video(
                 linewidth=1.6,
                 zorder=6,
             )
-        )
+            ax.add_patch(patch)
+            overlay_patches.append((body_index, patch))
 
     def _update(frame_idx: int):
         image.set_array(frames[frame_idx].T.ravel())
         title.set_text(f"Vorticity t={times[frame_idx]:.4f}")
-        return [image, title]
+        for body_index, patch in overlay_patches:
+            geometry = frame_geometries[frame_idx][body_index]
+            patch.set_visible(geometry is not None)
+            if geometry is not None:
+                patch.center = geometry[:2]
+                patch.set_radius(geometry[2])
+        return [image, title, *(patch for _, patch in overlay_patches)]
 
     anim = FuncAnimation(fig, _update, frames=len(frames), interval=1000.0 / max(fps, 1), blit=False)
     save_path = _result_path(save_name, results_dir=results_dir)

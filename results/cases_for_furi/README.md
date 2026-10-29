@@ -30,22 +30,22 @@ three production config files.
 Run from the repository root.
 
 ```powershell
-.\cases\cases_for_furi\run_00_spinup.ps1
-.\cases\cases_for_furi\run_01_stationary.ps1
-.\cases\cases_for_furi\run_02_y_oscillation.ps1
-.\cases\cases_for_furi\run_03_rotation.ps1
+.\results\cases_for_furi\run_00_spinup.ps1
+.\results\cases_for_furi\run_01_stationary.ps1
+.\results\cases_for_furi\run_02_y_oscillation.ps1
+.\results\cases_for_furi\run_03_rotation.ps1
 ```
 
 Or run everything sequentially:
 
 ```powershell
-.\cases\cases_for_furi\run_all.ps1
+.\results\cases_for_furi\run_all.ps1
 ```
 
 The three production cases all resume from:
 
 ```text
-cases/cases_for_furi/output/00_stationary_spinup_t0_t100/snap_100.9001.npz
+results/cases_for_furi/output/00_stationary_spinup_t0_t100/snap_100.9001.npz
 ```
 
 ## Case Parameters To Edit

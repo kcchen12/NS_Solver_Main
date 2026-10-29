@@ -12,6 +12,8 @@ draw_cylinder_overlay = true
 # Aerodynamic outputs
 auto_generate_coeff_history = true
 auto_generate_aero_report = true
+# Include free-Y mean/peak damper power and integrated energy in the report.
+auto_include_harvested_power = true
 auto_generate_shedding_spectrum = false
 auto_generate_y_oscillation_strouhal = false
 auto_generate_drag_decomposition = false

@@ -1,11 +1,12 @@
-# Experimental free-Y cylinder configuration.
+# Experimental free-theta cylinder configuration.
 enable_experimental_config = true
 
 truncate_y_cells = 0
 
-# Optional stationary downstream cylinder; center-to-center L/D, same diameter.
+# Optional downstream cylinder; free-y applies to both; center-to-center L/D.
 cylinder_downstream = false
 cylinder_downstream_spacing_ratio = 3.0
+cylinder_downstream_monitor_velocity_squared = false
 
 cylinder_free_x_dof = false
 cylinder_free_x_mass = 100.0
@@ -17,9 +18,8 @@ cylinder_free_x_max_displacement_percent = 25.0
 cylinder_free_x_max_speed = 0.25
 cylinder_free_x_release_time = 0.0
 
-cylinder_free_y_dof = true
-# Record y-dot squared every step and save its mechanical-power-proxy plot.
-cylinder_free_y_monitor_velocity_squared = true
+cylinder_free_y_dof = false
+cylinder_free_y_monitor_velocity_squared = false
 cylinder_free_y_mass = 100.0
 cylinder_free_y_damping = 2.0
 cylinder_free_y_stiffness = 101.0
@@ -29,15 +29,15 @@ cylinder_free_y_max_displacement_percent = off
 cylinder_free_y_max_speed = off
 cylinder_free_y_release_time = 100.0
 
-cylinder_free_theta_dof = false
+cylinder_free_theta_dof = true
 cylinder_free_theta_inertia = 10.0
 cylinder_free_theta_damping = 0.4
 cylinder_free_theta_stiffness = 10.1
 cylinder_free_theta_initial_angle_deg = 0.0
 cylinder_free_theta_initial_angular_velocity = 0.0
 cylinder_free_theta_moment_relaxation = 0.05
-cylinder_free_theta_max_angle_deg = 45.0
-cylinder_free_theta_max_angular_speed = 1.0
+cylinder_free_theta_max_angle_deg = off
+cylinder_free_theta_max_angular_speed = off
 
 cylinder_experiment = circle
 cylinder_indent_width = 0.0

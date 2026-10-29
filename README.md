@@ -4,6 +4,15 @@
 
 ## Overview
 
+With `auto_generate_aero_report = true`, enable
+`auto_include_harvested_power = true` in `post_config.txt` to include free-Y
+damper mean/peak power and integrated energy in `aero_report.txt`. Both
+tandem cylinders and their combined total are reported in solver units.
+The energy integral covers the full available motion history, including
+startup. Every-step velocity monitors are preferred; saved snapshot
+velocities provide a fallback. Standalone analysis supports
+`python analyze_aerodynamics.py --include-harvested-power`.
+
 - Solves incompressible flow with a fractional-step / projection method
 - Uses SSP-RK3 time integration
 - Uses a staggered Cartesian finite-volume layout
@@ -125,8 +134,9 @@ Initialization and runtime:
 - `enable_experimental_config`: master switch; when `false`, all other options in `experimental_config.txt` are ignored
 - `truncate_y_cells`: drop this many cells from both the bottom and top y boundaries before running
 - `cylinder_experiment`: body shape selector, one of `circle`, `top-indent`, `square`, `airfoil`, or `polygon`
-- `cylinder_downstream`: add an optional stationary circular cylinder downstream along +x; defaults to `false`
+- `cylinder_downstream`: add an optional circular cylinder downstream along +x; defaults to `false`. When `cylinder_free_y_dof = true`, both cylinders oscillate independently in Y with the same Y oscillator settings, each driven by its own IBM force. Otherwise the rear cylinder stays fixed. Motion is independent of power-monitoring options.
 - `cylinder_downstream_spacing_ratio`: center-to-center spacing `L/D`, default `3.0`, where `D` is the original cylinder diameter; must be finite and greater than `1`
+- `cylinder_downstream_monitor_velocity_squared`: with tandem cylinders and free Y motion enabled, write `outdir/tandem_y_velocity_squared.csv` every step and save `outdir/tandem_y_velocity_squared.png` at completion. Records each cylinder's velocity, velocity squared, and the sum of the two squared velocities. Defaults to `false`. For the shared damping coefficient `c`, total damper power is `c * (velocity_y_primary**2 + velocity_y_downstream**2)`. The primary-only monitor can be enabled simultaneously. Restart histories start fresh at the resumed time.
 - `polygon_points`, `polygon_angle_deg`: custom body-local vertices and initial orientation when `cylinder_experiment = polygon`
 - `cylinder_free_x_dof`, `cylinder_free_y_dof`, `cylinder_free_theta_dof`: enable streamwise, transverse, and/or angular spring-mass-damper motion for the selected bluff body
 - `cylinder_free_x_mass`, `cylinder_free_y_mass`, `cylinder_free_x_damping`, `cylinder_free_y_damping`, `cylinder_free_x_stiffness`, `cylinder_free_y_stiffness`: spring-mass-damper parameters for the free body
@@ -141,11 +151,12 @@ Initialization and runtime:
 To simulate two cylinders in tandem, set `enable_experimental_config = true`,
 `cylinder_downstream = true`, and `cylinder_downstream_spacing_ratio = 3.0`
 in `experimental_config.txt`. With `cylinder = true` in the main config and
-`cylinder_experiment = circle`, this places an equal-diameter stationary cylinder
+`cylinder_experiment = circle`, this places an equal-diameter cylinder
 at `(x_original + 3D, y_original)`, using the original reference center. Both
-cylinders must fit strictly inside the domain. Existing primary-cylinder motion
-settings still apply only to the original body; the downstream cylinder stays
-fixed. Snapshot metadata records both geometries. Existing surface-force
+cylinders must fit strictly inside the domain. Free Y motion applies to both;
+prescribed motion and free X/angular motion apply only to the primary body.
+Snapshot metadata records both geometries, individual Y states, and forces for restart.
+Existing surface-force
 coefficient analysis measures the original cylinder; IBM force totals include
 both bodies. Body contact/collision dynamics are not modeled.
 
